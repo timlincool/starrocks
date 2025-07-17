@@ -104,7 +104,13 @@ class MemTracker;
 /// At this point p.total_allocated_bytes_ would be 0.
 /// The one remaining (empty) chunk is released:
 ///    delete p;
+// Performance optimization: This class can be replaced with an optimized implementation
+// by defining USE_OPTIMIZED_MEM_POOL at compile time.
+#ifdef USE_OPTIMIZED_MEM_POOL
+class MemPool_Original {
+#else
 class MemPool {
+#endif
 public:
     MemPool() : next_chunk_size_(INITIAL_CHUNK_SIZE) {}
 
@@ -258,7 +264,20 @@ private:
     std::vector<ChunkInfo> chunks_;
 };
 
+#ifdef USE_OPTIMIZED_MEM_POOL
+// Include the optimized implementation
+#include "runtime/optimized_mem_pool.h"
+
+// Alias the optimized implementation to MemPool
+using MemPool = OptimizedMemPool;
+
+// Stamp out templated implementations for the original class
+template uint8_t* MemPool_Original::allocate<false>(int64_t size, int alignment, int reserve);
+template uint8_t* MemPool_Original::allocate<true>(int64_t size, int alignment, int reserve);
+#else
 // Stamp out templated implementations here so they're included in IR module
 template uint8_t* MemPool::allocate<false>(int64_t size, int alignment, int reserve);
 template uint8_t* MemPool::allocate<true>(int64_t size, int alignment, int reserve);
+#endif
+
 } // namespace starrocks

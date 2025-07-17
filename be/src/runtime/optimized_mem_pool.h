@@ -39,6 +39,12 @@ public:
     /// Allocates memory with specified alignment
     uint8_t* allocate_aligned(int64_t size, int alignment);
 
+    /// Allocates memory with reserve space (API compatibility with MemPool)
+    uint8_t* allocate_with_reserve(int64_t size, int reserve) {
+        // For compatibility, ignore reserve parameter in optimized implementation
+        return allocate(size);
+    }
+
     /// Allocates memory without throwing exceptions on failure
     uint8_t* try_allocate(int64_t size, int alignment = DEFAULT_ALIGNMENT);
 
@@ -54,8 +60,17 @@ public:
     /// Absorb chunks from another pool
     void acquire_data(OptimizedMemPool* src, bool keep_current = true);
 
+    /// API compatibility with original MemPool
+    void acquire_data(MemPool_Original* src, bool keep_current);
+
     /// Exchange data with another pool
     void exchange_data(OptimizedMemPool* other);
+
+    /// API compatibility with original MemPool
+    void exchange_data(MemPool_Original* other);
+
+    /// Debug string for diagnostics (API compatibility)
+    std::string debug_string();
 
     /// Get allocation statistics
     int64_t total_allocated_bytes() const { return _total_allocated_bytes.load(); }

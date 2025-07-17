@@ -27,7 +27,14 @@ namespace starrocks {
 // An ObjectPool maintains a list of C++ objects which are deallocated
 // by destroying the pool.
 // Thread-safe.
+//
+// Performance optimization: This class can be replaced with a lock-free implementation
+// by defining USE_OPTIMIZED_OBJECT_POOL at compile time.
+#ifdef USE_OPTIMIZED_OBJECT_POOL
+class ObjectPool_Original {
+#else
 class ObjectPool {
+#endif
 public:
     ObjectPool() = default;
 
@@ -72,5 +79,13 @@ private:
     std::vector<Element> _objects;
     SpinLock _lock;
 };
+
+#ifdef USE_OPTIMIZED_OBJECT_POOL
+// Include the optimized lock-free implementation
+#include "common/lockfree_object_pool.h"
+
+// Alias the optimized implementation to ObjectPool
+using ObjectPool = LockFreeObjectPool;
+#endif
 
 } // namespace starrocks
