@@ -89,8 +89,9 @@ public:
                                               std::memory_order_acquire));
     }
 
-    // API compatibility with original ObjectPool
-    void acquire_data(ObjectPool_Original* src) {
+    // API compatibility with original ObjectPool (forward declaration)
+    template<typename T>
+    void acquire_data(T* src) {
         // For compatibility with original ObjectPool, we can't efficiently transfer
         // objects without exposing internal structure. This is a limitation of the
         // mixed usage scenario. In practice, this method is rarely used.
