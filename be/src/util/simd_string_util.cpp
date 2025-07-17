@@ -28,15 +28,16 @@ bool SIMDStringUtil::has_sse42_support() {
 #ifdef __SSE4_2__
     static bool checked = false;
     static bool supported = false;
-    
+
     if (!checked) {
         unsigned int eax, ebx, ecx, edx;
         if (__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
-            supported = (ecx & bit_SSE4_2) != 0;
+            // SSE4.2 is bit 20 in ECX
+            supported = (ecx & (1 << 20)) != 0;
         }
         checked = true;
     }
-    
+
     return supported;
 #else
     return false;
@@ -47,15 +48,16 @@ bool SIMDStringUtil::has_avx2_support() {
 #ifdef __AVX2__
     static bool checked = false;
     static bool supported = false;
-    
+
     if (!checked) {
         unsigned int eax, ebx, ecx, edx;
         if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
-            supported = (ebx & bit_AVX2) != 0;
+            // AVX2 is bit 5 in EBX
+            supported = (ebx & (1 << 5)) != 0;
         }
         checked = true;
     }
-    
+
     return supported;
 #else
     return false;
@@ -140,8 +142,8 @@ const char* SIMDStringUtil::find_substring_simd(const char* haystack, size_t hay
             for (const char* pos = haystack; pos < end; ++pos) {
                 __m128i haystack_vec = _mm_loadu_si128(reinterpret_cast<const __m128i*>(pos));
                 
-                int result = _mm_cmpestri(needle_vec, needle_len, haystack_vec, 
-                                         std::min(static_cast<size_t>(16), end - pos), 
+                int result = _mm_cmpestri(needle_vec, needle_len, haystack_vec,
+                                         std::min(static_cast<size_t>(16), static_cast<size_t>(end - pos)),
                                          _SIDD_CMP_EQUAL_ORDERED);
                 
                 if (result == 0) {

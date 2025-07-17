@@ -97,8 +97,8 @@ private:
     struct Node {
         void* obj;
         DeleteFn delete_fn;
-        std::atomic<Node*> next;
-        
+        Node* next;
+
         Node(void* o, DeleteFn fn, Node* n) : obj(o), delete_fn(fn), next(n) {}
     };
 
