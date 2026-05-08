@@ -14,10 +14,14 @@
 
 #pragma once
 
+#include <memory>
+
 #include "cache/remote_cache_engine.h"
 #include "starcache/time_based_cache_adaptor.h"
 
 namespace starrocks {
+
+class BrpcStubCache;
 
 class PeerCacheEngine : public RemoteCacheEngine {
 public:
@@ -26,9 +30,12 @@ public:
 
     Status init(const RemoteCacheOptions& options) override;
 
-    Status read(const std::string& key, size_t off, size_t size, IOBuffer* buffer, ReadCacheOptions* options) override;
+    void set_stub_cache(BrpcStubCache* stub_cache) { _stub_cache = stub_cache; }
 
-    Status write(const std::string& key, const IOBuffer& buffer, WriteCacheOptions* options) override {
+    Status read(const std::string& key, size_t off, size_t size, IOBuffer* buffer,
+                DiskCacheReadOptions* options) override;
+
+    Status write(const std::string& key, const IOBuffer& buffer, DiskCacheWriteOptions* options) override {
         return Status::NotSupported("write data to peer cache is unsupported");
     }
 
@@ -44,6 +51,7 @@ public:
 
 private:
     std::unique_ptr<starcache::TimeBasedCacheAdaptor> _cache_adaptor;
+    BrpcStubCache* _stub_cache = nullptr;
 };
 
 } // namespace starrocks

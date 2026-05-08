@@ -16,6 +16,7 @@ package com.starrocks.sql.formatter;
 
 import com.google.common.base.Joiner;
 import com.starrocks.catalog.FunctionSet;
+import com.starrocks.catalog.TableName;
 import com.starrocks.sql.analyzer.AstToStringBuilder;
 import com.starrocks.sql.ast.AstVisitorExtendInterface;
 import com.starrocks.sql.ast.OrderByElement;
@@ -35,17 +36,21 @@ import com.starrocks.sql.ast.expression.CompoundPredicate;
 import com.starrocks.sql.ast.expression.DateLiteral;
 import com.starrocks.sql.ast.expression.DefaultValueExpr;
 import com.starrocks.sql.ast.expression.DictMappingExpr;
+import com.starrocks.sql.ast.expression.DictQueryExpr;
 import com.starrocks.sql.ast.expression.DictionaryGetExpr;
 import com.starrocks.sql.ast.expression.ExistsPredicate;
 import com.starrocks.sql.ast.expression.Expr;
+import com.starrocks.sql.ast.expression.ExprToSql;
 import com.starrocks.sql.ast.expression.FieldReference;
 import com.starrocks.sql.ast.expression.FunctionCallExpr;
+import com.starrocks.sql.ast.expression.FunctionParams;
 import com.starrocks.sql.ast.expression.InPredicate;
 import com.starrocks.sql.ast.expression.InformationFunction;
 import com.starrocks.sql.ast.expression.IntervalLiteral;
 import com.starrocks.sql.ast.expression.IsNullPredicate;
 import com.starrocks.sql.ast.expression.LambdaArgument;
 import com.starrocks.sql.ast.expression.LambdaFunctionExpr;
+import com.starrocks.sql.ast.expression.LargeInPredicate;
 import com.starrocks.sql.ast.expression.LargeStringLiteral;
 import com.starrocks.sql.ast.expression.LikePredicate;
 import com.starrocks.sql.ast.expression.LiteralExpr;
@@ -61,7 +66,6 @@ import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.sql.ast.expression.StringLiteral;
 import com.starrocks.sql.ast.expression.SubfieldExpr;
 import com.starrocks.sql.ast.expression.Subquery;
-import com.starrocks.sql.ast.expression.TableName;
 import com.starrocks.sql.ast.expression.TimestampArithmeticExpr;
 import com.starrocks.sql.ast.expression.UserVariableExpr;
 import com.starrocks.sql.ast.expression.VarBinaryLiteral;
@@ -76,13 +80,29 @@ import java.util.stream.Collectors;
  * @Todo: merge with AST2StringVisitor
  */
 public class ExprExplainVisitor implements AstVisitorExtendInterface<String, Void> {
-    private final FormatOptions options = FormatOptions.allEnable();
+    private FormatOptions options = FormatOptions.allEnable();
 
     public ExprExplainVisitor() {
         options.setEnableDigest(false);
     }
 
+    public ExprExplainVisitor(FormatOptions options) {
+        this.options = options;
+    }
+
     // ========================================= Helper Methods =========================================
+    private static String getOrderByStringToSql(FunctionParams functionParams) {
+        List<OrderByElement> orderByElements = functionParams.getOrderByElements();
+        if (orderByElements == null || orderByElements.isEmpty()) {
+            return "";
+        }
+
+        String orderBySql = orderByElements.stream()
+                .map(ExprToSql::toSql)
+                .collect(Collectors.joining(" "));
+        return " ORDER BY " + orderBySql;
+    }
+
     private List<String> visitChildren(List<Expr> children) {
         if (children == null || children.isEmpty()) {
             return List.of();
@@ -254,6 +274,20 @@ public class ExprExplainVisitor implements AstVisitorExtendInterface<String, Voi
     }
 
     @Override
+    public String visitLargeInPredicate(LargeInPredicate node, Void context) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(node.getCompareExpr().accept(this, context));
+
+        if (node.isNotIn()) {
+            sb.append(" NOT");
+        }
+        sb.append(" IN (");
+        sb.append(node.getRawText());
+        sb.append(")");
+        return sb.toString();
+    }
+
+    @Override
     public String visitIsNullPredicate(IsNullPredicate node, Void context) {
         String expr = node.getChild(0).accept(this, context);
         return expr + (node.isNotNull() ? " IS NOT NULL" : " IS NULL");
@@ -295,7 +329,7 @@ public class ExprExplainVisitor implements AstVisitorExtendInterface<String, Voi
         sb.append(childrenSql);
 
         if (node.getFnParams().getOrderByElements() != null) {
-            sb.append(node.getFnParams().getOrderByStringToSql());
+            sb.append(getOrderByStringToSql(node.getFnParams()));
         }
         sb.append(")");
         return sb.toString();
@@ -394,7 +428,7 @@ public class ExprExplainVisitor implements AstVisitorExtendInterface<String, Voi
                     .collect(Collectors.joining(",")));
         }
         if (node.getWindow() != null) {
-            sb.append(" ").append(node.getWindow().toSql());
+            sb.append(" ").append(ExprToSql.toSql(node.getWindow()));
         }
 
         FunctionCallExpr fnCall = node.getFnCall();
@@ -540,6 +574,11 @@ public class ExprExplainVisitor implements AstVisitorExtendInterface<String, Voi
         return fnName + "(" + visit(node.getChild(0)) + ", ["
                 + visit(node.getChild(1)) + "], "
                 + visit(node.getChild(2)) + ")";
+    }
+
+    @Override
+    public String visitDictQueryExpr(DictQueryExpr node, Void context) {
+        return visitFunctionCall(node, context);
     }
 
     // ========================================= Arrow and Subfield Expressions =========================================

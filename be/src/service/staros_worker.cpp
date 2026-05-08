@@ -19,21 +19,23 @@
 #include <starlet.h>
 #include <worker.h>
 
-#include "common/config.h"
+#include "base/concurrency/await.h"
+#include "base/container/lru_cache.h"
+#include "base/crypto/sha.h"
+#include "base/utility/defer_op.h"
+#include "common/config_staros_worker_fwd.h"
 #include "common/gflags_utils.h"
 #include "common/logging.h"
 #include "common/shutdown_hook.h"
+#include "common/util/debug_util.h"
+#include "common/util/table_metrics.h"
 #include "file_store.pb.h"
 #include "fmt/format.h"
+#include "fs/fs_factory.h"
 #include "fslib/star_cache_configuration.h"
 #include "fslib/star_cache_handler.h"
 #include "gflags/gflags.h"
-#include "util/await.h"
-#include "util/debug_util.h"
-#include "util/defer_op.h"
-#include "util/lru_cache.h"
-#include "util/sha.h"
-#include "util/starrocks_metrics.h"
+#include "service/service_metrics.h"
 
 // cachemgr thread pool size
 DECLARE_int32(cachemgr_threadpool_size);
@@ -64,11 +66,12 @@ std::unique_ptr<staros::starlet::Starlet> g_starlet;
 
 namespace fslib = staros::starlet::fslib;
 
-StarOSWorker::StarOSWorker()
+StarOSWorker::StarOSWorker(TableMetricsManager* table_metrics_mgr)
         : _mtx(),
           _cache_mtx(),
           _shards(),
-          _fs_cache(new_lru_cache(config::starlet_filesystem_instance_cache_capacity)) {}
+          _fs_cache(new_lru_cache(config::starlet_filesystem_instance_cache_capacity)),
+          _table_metrics_mgr(table_metrics_mgr) {}
 
 StarOSWorker::~StarOSWorker() = default;
 
@@ -107,9 +110,9 @@ absl::Status StarOSWorker::add_shard(const ShardInfo& shard) {
     auto ret = _shards.insert_or_assign(shard.id, ShardInfoDetails(shard));
     l.unlock();
     if (ret.second) {
-#ifndef BE_TEST
-        StarRocksMetrics::instance()->table_metrics_mgr()->register_table(get_table_id(shard));
-#endif
+        if (_table_metrics_mgr != nullptr) {
+            _table_metrics_mgr->register_table(get_table_id(shard));
+        }
         // it is an insert op to the map
         // NOTE:
         //  1. Since the following statement is invoked outside the lock, it is possible that
@@ -139,10 +142,10 @@ absl::Status StarOSWorker::remove_shard(const ShardId id) {
     std::unique_lock l(_mtx);
     auto iter = _shards.find(id);
     if (iter != _shards.end()) {
-#ifndef BE_TEST
         uint64_t table_id = get_table_id(iter->second.shard_info);
-        StarRocksMetrics::instance()->table_metrics_mgr()->unregister_table(table_id);
-#endif
+        if (_table_metrics_mgr != nullptr) {
+            _table_metrics_mgr->unregister_table(table_id);
+        }
         _shards.erase(iter);
     }
     return absl::OkStatus();
@@ -172,6 +175,17 @@ std::vector<staros::starlet::ShardInfo> StarOSWorker::shards() const {
     std::shared_lock l(_mtx);
     for (const auto& shard : _shards) {
         vec.emplace_back(shard.second.shard_info);
+    }
+    return vec;
+}
+
+std::vector<staros::starlet::ShardId> StarOSWorker::shard_ids() const {
+    std::vector<staros::starlet::ShardId> vec;
+    vec.reserve(_shards.size());
+
+    std::shared_lock l(_mtx);
+    for (const auto& shard : _shards) {
+        vec.emplace_back(shard.first);
     }
     return vec;
 }
@@ -210,9 +224,15 @@ absl::StatusOr<std::shared_ptr<fslib::FileSystem>> StarOSWorker::get_shard_files
             return build_filesystem_on_demand(id, conf);
         }
 
-        auto fs = lookup_fs_cache(it->second.fs_cache_key);
-        if (fs != nullptr) {
-            return fs;
+        // Cache miss: reset the fs_cache_key to ensure a new shared_ptr will be created
+        {
+            std::lock_guard<std::mutex> reset_lock(_fs_cache_key_reset_mtx);
+            auto fs = lookup_fs_cache(it->second.fs_cache_key);
+            if (fs != nullptr) {
+                return fs;
+            }
+
+            it->second.fs_cache_key.reset();
         }
         shard_info = it->second.shard_info;
     }
@@ -252,7 +272,15 @@ absl::StatusOr<staros::starlet::ShardInfo> StarOSWorker::_fetch_shard_info_from_
     }
 
     // get_shard_info call will probably trigger an add_shard() call to worker itself. Be sure there is no dead lock.
-    return g_starlet->get_shard_info(id);
+    // Count every actual starmgr RPC issued from this fallback path. A high rate signals that
+    // FE-side task/node selection is scheduling work on a BE whose local cache does not have
+    // the shard (the FE did not push it in time, or the placement was wrong).
+    ServiceMetrics::instance()->staros_shard_info_fallback_total.increment(1);
+    auto info_or = g_starlet->get_shard_info(id);
+    if (!info_or.ok()) {
+        ServiceMetrics::instance()->staros_shard_info_fallback_failed_total.increment(1);
+    }
+    return info_or;
 }
 
 absl::StatusOr<std::shared_ptr<fslib::FileSystem>> StarOSWorker::build_filesystem_on_demand(ShardId id,
@@ -272,7 +300,9 @@ absl::StatusOr<std::shared_ptr<fslib::FileSystem>> StarOSWorker::build_filesyste
 
 absl::StatusOr<std::pair<std::shared_ptr<std::string>, std::shared_ptr<fslib::FileSystem>>>
 StarOSWorker::build_filesystem_from_shard_info(const ShardInfo& info, const Configuration& conf) {
-    auto localconf = build_conf_from_shard_info(info);
+    // Pass the external configuration to build_conf_from_shard_info as initial configuration.
+    // The shard info configuration will be merged on top of it in fslib_conf_from_this().
+    auto localconf = build_conf_from_shard_info(info, conf.empty() ? nullptr : &conf);
     if (!localconf.ok()) {
         return localconf.status();
     }
@@ -317,9 +347,10 @@ absl::StatusOr<std::string> StarOSWorker::build_scheme_from_shard_info(const Sha
     return scheme;
 }
 
-absl::StatusOr<fslib::Configuration> StarOSWorker::build_conf_from_shard_info(const ShardInfo& info) {
+absl::StatusOr<fslib::Configuration> StarOSWorker::build_conf_from_shard_info(const ShardInfo& info,
+                                                                              const Configuration* initial_conf) {
     // use the remote fsroot as the default cache identifier
-    return info.fslib_conf_from_this(need_enable_cache(info), "");
+    return info.fslib_conf_from_this(need_enable_cache(info), "", initial_conf);
 }
 
 absl::StatusOr<std::pair<std::shared_ptr<std::string>, std::shared_ptr<fslib::FileSystem>>>
@@ -460,7 +491,8 @@ Status to_status(const absl::Status& absl_status) {
     }
 }
 
-void init_staros_worker(const std::shared_ptr<starcache::StarCache>& star_cache) {
+void init_staros_worker(const std::shared_ptr<starcache::StarCache>& star_cache,
+                        TableMetricsManager* table_metrics_mgr) {
     if (g_starlet.get() != nullptr) {
         return;
     }
@@ -505,7 +537,7 @@ void init_staros_worker(const std::shared_ptr<starcache::StarCache>& star_cache)
 
     staros::starlet::StarletConfig starlet_config;
     starlet_config.rpc_port = config::starlet_port;
-    g_worker = std::make_shared<StarOSWorker>();
+    g_worker = std::make_shared<StarOSWorker>(table_metrics_mgr);
     g_starlet = std::make_unique<staros::starlet::Starlet>(g_worker);
     g_starlet->init(starlet_config);
     g_starlet->start();
@@ -535,6 +567,13 @@ void update_staros_starcache() {
     if (fslib::FLAGS_star_cache_mem_size_bytes != config::starlet_star_cache_mem_size_bytes) {
         fslib::FLAGS_star_cache_mem_size_bytes = config::starlet_star_cache_mem_size_bytes;
         (void)fslib::star_cache_update_memory_quota_bytes(fslib::FLAGS_star_cache_mem_size_bytes);
+    }
+}
+
+void set_starlet_in_shutdown() {
+    auto* starlet = g_starlet.get();
+    if (starlet) {
+        starlet->on_shutdown();
     }
 }
 

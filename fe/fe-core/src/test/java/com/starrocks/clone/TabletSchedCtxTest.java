@@ -25,16 +25,13 @@ import com.starrocks.catalog.DataProperty;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.DiskInfo;
 import com.starrocks.catalog.DistributionInfo;
-import com.starrocks.catalog.KeysType;
 import com.starrocks.catalog.LocalTablet;
 import com.starrocks.catalog.MaterializedIndex;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.PartitionInfo;
-import com.starrocks.catalog.PrimitiveType;
 import com.starrocks.catalog.RandomDistributionInfo;
 import com.starrocks.catalog.Replica;
-import com.starrocks.catalog.ScalarType;
 import com.starrocks.catalog.SinglePartitionInfo;
 import com.starrocks.catalog.TabletMeta;
 import com.starrocks.clone.TabletSchedCtx.Priority;
@@ -43,12 +40,14 @@ import com.starrocks.clone.TabletScheduler.PathSlot;
 import com.starrocks.common.Config;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.sql.ast.KeysType;
 import com.starrocks.system.Backend;
 import com.starrocks.task.AgentBatchTask;
 import com.starrocks.task.AgentTask;
 import com.starrocks.thrift.TStorageMedium;
 import com.starrocks.thrift.TStorageType;
 import com.starrocks.thrift.TTabletSchedule;
+import com.starrocks.type.IntegerType;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -68,8 +67,8 @@ public class TabletSchedCtxTest {
     private static int PH_PART_ID = 6;
 
     private static String TB_NAME = "test";
-    private static List<Column> TB_BASE_SCHEMA = Lists.newArrayList(new Column("k1", ScalarType
-            .createType(PrimitiveType.TINYINT), true, null, "", "key1"));
+    private static List<Column> TB_BASE_SCHEMA = Lists.newArrayList(new Column("k1",
+            IntegerType.TINYINT, true, null, "", "key1"));
 
     private static int TABLET_ID_1 = 50000;
     private static int TABLET_ID_2 = 51000;
@@ -83,6 +82,10 @@ public class TabletSchedCtxTest {
 
     @BeforeEach
     public void setUp() {
+        // Clean up any existing tablets from previous test runs
+        GlobalStateMgr.getCurrentState().getTabletInvertedIndex().deleteTablet(TABLET_ID_1);
+        GlobalStateMgr.getCurrentState().getTabletInvertedIndex().deleteTablet(TABLET_ID_2);
+        
         // be1
         be1 = new Backend(10001, "192.168.0.1", 9051);
         Map<String, DiskInfo> disks = Maps.newHashMap();
@@ -118,13 +121,12 @@ public class TabletSchedCtxTest {
                 addReplica(TABLET_ID_1, new Replica(50001, be1.getId(), 0, Replica.ReplicaState.NORMAL));
 
         // mock catalog
-        MaterializedIndex baseIndex = new MaterializedIndex(TB_ID, MaterializedIndex.IndexState.NORMAL);
+        MaterializedIndex baseIndex = new MaterializedIndex(INDEX_ID, MaterializedIndex.IndexState.NORMAL);
         DistributionInfo distributionInfo = new RandomDistributionInfo(32);
         Partition partition = new Partition(PART_ID, PH_PART_ID, TB_NAME, baseIndex, distributionInfo);
         baseIndex.addTablet(tablet, tabletMeta);
         PartitionInfo partitionInfo = new SinglePartitionInfo();
         partitionInfo.setReplicationNum(PART_ID, (short) 3);
-        partitionInfo.setIsInMemory(PART_ID, false);
         DataProperty dataProperty = new DataProperty(TStorageMedium.HDD);
         partitionInfo.setDataProperty(PART_ID, dataProperty);
         OlapTable olapTable =
@@ -343,5 +345,38 @@ public class TabletSchedCtxTest {
         Assertions.assertEquals(2L, res.getCommitted_version());
         Assertions.assertEquals(0L, res.getFailed_schedule_count());
         Assertions.assertEquals(0L, res.getFailed_running_count());
+    }
+
+    @Test
+    public void testChooseSrcReplica() {
+        Replica replicaNormalIncomplete = new Replica(70001L, be1.getId(), 0, Replica.ReplicaState.NORMAL);
+        replicaNormalIncomplete.setPathHash(2001L);
+        replicaNormalIncomplete.updateVersionInfo(90L, 90L, 0L);
+
+        Replica replicaDecommissionHealthy = new Replica(70002L, be2.getId(), 0, Replica.ReplicaState.DECOMMISSION);
+        replicaDecommissionHealthy.setPathHash(2002L);
+        replicaDecommissionHealthy.updateVersionInfo(100L, 100L, 0L);
+
+        LocalTablet tablet = new LocalTablet(30001L, Lists.newArrayList(replicaNormalIncomplete, replicaDecommissionHealthy));
+
+        TabletSchedCtx ctx = new TabletSchedCtx(Type.REPAIR, DB_ID, TB_ID, PART_ID, INDEX_ID,
+                30001L, System.currentTimeMillis(),
+                GlobalStateMgr.getCurrentState().getNodeMgr().getClusterInfo());
+        ctx.setTablet(tablet);
+        ctx.setStorageMedium(TStorageMedium.HDD);
+        ctx.setVersionInfo(100L, 100L, 0L, 0L);
+
+        Map<Long, PathSlot> backendsWorkingSlots = Maps.newConcurrentMap();
+        backendsWorkingSlots.put(be1.getId(), new PathSlot(Lists.newArrayList(2001L), 1));
+        backendsWorkingSlots.put(be2.getId(), new PathSlot(Lists.newArrayList(2002L), 1));
+
+        try {
+            ctx.chooseSrcReplica(backendsWorkingSlots);
+        } catch (Exception e) {
+            Assertions.fail(e);
+        }
+
+        Assertions.assertEquals(be2.getId(), ctx.getSrcBackendId());
+        Assertions.assertEquals(2002L, ctx.getSrcPathHash());
     }
 }

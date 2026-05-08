@@ -36,19 +36,19 @@ package com.starrocks.catalog;
 
 import com.google.common.collect.Lists;
 import com.starrocks.backup.CatalogMocker;
-import com.starrocks.catalog.Replica.ReplicaStatus;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.RunMode;
 import com.starrocks.sql.ast.AdminShowReplicaStatusStmt;
-import com.starrocks.sql.ast.PartitionNames;
+import com.starrocks.sql.ast.QualifiedName;
+import com.starrocks.sql.ast.ReplicaStatus;
+import com.starrocks.sql.ast.TableRef;
 import com.starrocks.sql.ast.expression.BinaryPredicate;
 import com.starrocks.sql.ast.expression.BinaryType;
 import com.starrocks.sql.ast.expression.SlotRef;
 import com.starrocks.sql.ast.expression.StringLiteral;
-import com.starrocks.sql.ast.expression.TableName;
-import com.starrocks.sql.ast.expression.TableRef;
+import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.system.SystemInfoService;
 import mockit.Expectations;
 import mockit.Mock;
@@ -133,7 +133,6 @@ public class MetadataViewerTest {
                 null};
         List<List<String>> result = (List<List<String>>) getTabletStatusMethod.invoke(null, args);
         Assertions.assertEquals(3, result.size());
-        System.out.println(result);
 
         args = new Object[] {CatalogMocker.TEST_DB_NAME, CatalogMocker.TEST_TBL_NAME, partitions, ReplicaStatus.DEAD,
                 BinaryType.EQ};
@@ -152,7 +151,6 @@ public class MetadataViewerTest {
         Object[] args = new Object[] {CatalogMocker.TEST_DB_NAME, CatalogMocker.TEST_TBL_NAME, null};
         List<List<String>> result = (List<List<String>>) getTabletDistributionMethod.invoke(null, args);
         Assertions.assertEquals(3, result.size());
-        System.out.println(result);
     }
 
     @Test
@@ -193,10 +191,11 @@ public class MetadataViewerTest {
     public void testGetTabletStatusWithStatement() throws Exception {
         // Test with null where clause
         TableName tableName = new TableName(CatalogMocker.TEST_DB_NAME, CatalogMocker.TEST_TBL_NAME);
-        TableRef tableRef = new TableRef(tableName, null);
+        QualifiedName qualifiedName = QualifiedName.of(List.of(tableName.getDb(), tableName.getTbl()));
+        TableRef tableRef = new TableRef(qualifiedName, null, NodePosition.ZERO);
         AdminShowReplicaStatusStmt stmt = new AdminShowReplicaStatusStmt(tableRef, null);
 
-        List<List<String>> result = MetadataViewer.getTabletStatus(stmt);
+        List<List<String>> result = MetadataViewer.getTabletStatus(stmt, connectContext);
         Assertions.assertEquals(3, result.size());
     }
 
@@ -204,7 +203,8 @@ public class MetadataViewerTest {
     public void testGetTabletStatusWithWhereClause() throws Exception {
         // Test with where clause: status = 'DEAD'
         TableName tableName = new TableName(CatalogMocker.TEST_DB_NAME, CatalogMocker.TEST_TBL_NAME);
-        TableRef tableRef = new TableRef(tableName, null);
+        QualifiedName qualifiedName = QualifiedName.of(List.of(tableName.getDb(), tableName.getTbl()));
+        TableRef tableRef = new TableRef(qualifiedName, null, NodePosition.ZERO);
 
         // Create where clause: status = 'DEAD'
         SlotRef leftChild = new SlotRef(tableName, "status");
@@ -213,7 +213,7 @@ public class MetadataViewerTest {
 
         AdminShowReplicaStatusStmt stmt = new AdminShowReplicaStatusStmt(tableRef, where);
 
-        List<List<String>> result = MetadataViewer.getTabletStatus(stmt);
+        List<List<String>> result = MetadataViewer.getTabletStatus(stmt, connectContext);
         Assertions.assertEquals(3, result.size());
     }
 
@@ -221,7 +221,8 @@ public class MetadataViewerTest {
     public void testGetTabletStatusWithNotEqualWhereClause() throws Exception {
         // Test with where clause: status != 'DEAD'
         TableName tableName = new TableName(CatalogMocker.TEST_DB_NAME, CatalogMocker.TEST_TBL_NAME);
-        TableRef tableRef = new TableRef(tableName, null);
+        QualifiedName qualifiedName = QualifiedName.of(List.of(tableName.getDb(), tableName.getTbl()));
+        TableRef tableRef = new TableRef(qualifiedName, null, NodePosition.ZERO);
 
         // Create where clause: status != 'DEAD'
         SlotRef leftChild = new SlotRef(tableName, "status");
@@ -230,7 +231,7 @@ public class MetadataViewerTest {
 
         AdminShowReplicaStatusStmt stmt = new AdminShowReplicaStatusStmt(tableRef, where);
 
-        List<List<String>> result = MetadataViewer.getTabletStatus(stmt);
+        List<List<String>> result = MetadataViewer.getTabletStatus(stmt, connectContext);
         Assertions.assertEquals(0, result.size());
     }
 
@@ -238,7 +239,8 @@ public class MetadataViewerTest {
     public void testGetTabletStatusWithInvalidStatusFilter() throws Exception {
         // Test with where clause: status = 'INVALID_STATUS'
         TableName tableName = new TableName(CatalogMocker.TEST_DB_NAME, CatalogMocker.TEST_TBL_NAME);
-        TableRef tableRef = new TableRef(tableName, null);
+        QualifiedName qualifiedName = QualifiedName.of(List.of(tableName.getDb(), tableName.getTbl()));
+        TableRef tableRef = new TableRef(qualifiedName, null, NodePosition.ZERO);
 
         // Create where clause: status = 'INVALID_STATUS'
         SlotRef leftChild = new SlotRef(tableName, "status");
@@ -247,7 +249,7 @@ public class MetadataViewerTest {
 
         AdminShowReplicaStatusStmt stmt = new AdminShowReplicaStatusStmt(tableRef, where);
 
-        List<List<String>> result = MetadataViewer.getTabletStatus(stmt);
+        List<List<String>> result = MetadataViewer.getTabletStatus(stmt, connectContext);
         // Should return all results since invalid status filter is treated as null
         Assertions.assertEquals(3, result.size());
     }
@@ -256,7 +258,8 @@ public class MetadataViewerTest {
     public void testGetTabletStatusWithNonStatusColumn() throws Exception {
         // Test with where clause on non-status column: name = 'test'
         TableName tableName = new TableName(CatalogMocker.TEST_DB_NAME, CatalogMocker.TEST_TBL_NAME);
-        TableRef tableRef = new TableRef(tableName, null);
+        QualifiedName qualifiedName = QualifiedName.of(List.of(tableName.getDb(), tableName.getTbl()));
+        TableRef tableRef = new TableRef(qualifiedName, null, NodePosition.ZERO);
 
         // Create where clause: name = 'test' (not status column)
         SlotRef leftChild = new SlotRef(tableName, "name");
@@ -265,7 +268,7 @@ public class MetadataViewerTest {
 
         AdminShowReplicaStatusStmt stmt = new AdminShowReplicaStatusStmt(tableRef, where);
 
-        List<List<String>> result = MetadataViewer.getTabletStatus(stmt);
+        List<List<String>> result = MetadataViewer.getTabletStatus(stmt, connectContext);
         // Should return all results since non-status column filter is ignored
         Assertions.assertEquals(3, result.size());
     }
@@ -274,7 +277,8 @@ public class MetadataViewerTest {
     public void testGetTabletStatusWithOKStatus() throws Exception {
         // Test with where clause: status = 'OK'
         TableName tableName = new TableName(CatalogMocker.TEST_DB_NAME, CatalogMocker.TEST_TBL_NAME);
-        TableRef tableRef = new TableRef(tableName, null);
+        QualifiedName qualifiedName = QualifiedName.of(List.of(tableName.getDb(), tableName.getTbl()));
+        TableRef tableRef = new TableRef(qualifiedName, null, NodePosition.ZERO);
 
         // Create where clause: status = 'OK'
         SlotRef leftChild = new SlotRef(tableName, "status");
@@ -283,7 +287,7 @@ public class MetadataViewerTest {
 
         AdminShowReplicaStatusStmt stmt = new AdminShowReplicaStatusStmt(tableRef, where);
 
-        List<List<String>> result = MetadataViewer.getTabletStatus(stmt);
+        List<List<String>> result = MetadataViewer.getTabletStatus(stmt, connectContext);
         // Should return 0 results since no replicas have OK status in the mock
         Assertions.assertEquals(0, result.size());
     }

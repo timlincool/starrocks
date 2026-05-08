@@ -14,41 +14,55 @@
 
 #pragma once
 
-#include "cache/block_cache/block_cache.h"
-#include "cache/local_cache_engine.h"
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "cache/disk_cache/local_disk_cache_engine.h"
+#include "cache/mem_cache/local_mem_cache_engine.h"
 #include "common/status.h"
 
 namespace starrocks {
 
+class BlockCache;
+struct BlockCacheOptions;
 class Status;
-class StorePath;
 class RemoteCacheEngine;
-class DiskCacheOptions;
-class GlobalEnv;
+struct RemoteCacheOptions;
+struct DiskCacheOptions;
+struct MemCacheOptions;
 class DiskSpaceMonitor;
+class MetricRegistry;
+class MemTracker;
 class MemSpaceMonitor;
 class StoragePageCache;
 class Cache;
+class BrpcStubCache;
+
+struct DataCacheInitOptions {
+    std::vector<std::string> storage_root_paths;
+    MetricRegistry* metrics = nullptr;
+    int64_t process_mem_limit = -1;
+    MemTracker* process_mem_tracker = nullptr;
+};
 
 class DataCache {
 public:
     static DataCache* GetInstance();
 
-    Status init(const std::vector<StorePath>& store_paths);
+    Status init(const DataCacheInitOptions& options);
+    void attach_peer_cache_stub_cache(BrpcStubCache* brpc_stub_cache);
     void destroy();
 
     void try_release_resource_before_core_dump();
 
-    void set_local_mem_cache(std::shared_ptr<LocalCacheEngine> local_mem_cache) {
-        _local_mem_cache = std::move(local_mem_cache);
-    }
-    void set_local_disk_cache(std::shared_ptr<LocalCacheEngine> local_disk_cache) {
+    void set_local_disk_cache(std::shared_ptr<LocalDiskCacheEngine> local_disk_cache) {
         _local_disk_cache = std::move(local_disk_cache);
     }
     void set_page_cache(std::shared_ptr<StoragePageCache> page_cache) { _page_cache = std::move(page_cache); }
 
-    LocalCacheEngine* local_mem_cache() { return _local_mem_cache.get(); }
-    LocalCacheEngine* local_disk_cache() { return _local_disk_cache.get(); }
+    LocalMemCacheEngine* local_mem_cache() { return _local_mem_cache.get(); }
+    LocalDiskCacheEngine* local_disk_cache() { return _local_disk_cache.get(); }
     BlockCache* block_cache() const { return _block_cache.get(); }
     void set_block_cache(std::shared_ptr<BlockCache> block_cache) { _block_cache = std::move(block_cache); }
     StoragePageCache* page_cache() const { return _page_cache.get(); }
@@ -63,25 +77,24 @@ public:
 
 private:
     StatusOr<MemCacheOptions> _init_mem_cache_options();
-    StatusOr<DiskCacheOptions> _init_disk_cache_options();
     RemoteCacheOptions _init_remote_cache_options();
     BlockCacheOptions _init_block_cache_options();
 
 #if defined(WITH_STARCACHE)
+    StatusOr<DiskCacheOptions> _init_disk_cache_options();
     Status _init_starcache_engine(DiskCacheOptions* cache_options);
     Status _init_peer_cache(const RemoteCacheOptions& cache_options);
 #endif
     Status _init_lrucache_engine(const MemCacheOptions& cache_options);
-    Status _init_page_cache();
+    Status _init_page_cache(MetricRegistry* metrics);
 
-    GlobalEnv* _global_env;
-    std::vector<StorePath> _store_paths;
+    std::vector<std::string> _storage_root_paths;
+    int64_t _process_mem_limit = -1;
+    MemTracker* _process_mem_tracker = nullptr;
 
     // cache engine
-    std::string _local_mem_cache_engine;
-    std::string _local_disk_cache_engine;
-    std::shared_ptr<LocalCacheEngine> _local_mem_cache;
-    std::shared_ptr<LocalCacheEngine> _local_disk_cache;
+    std::shared_ptr<LocalMemCacheEngine> _local_mem_cache;
+    std::shared_ptr<LocalDiskCacheEngine> _local_disk_cache;
     std::shared_ptr<RemoteCacheEngine> _remote_cache;
 
     std::shared_ptr<BlockCache> _block_cache;

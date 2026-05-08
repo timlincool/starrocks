@@ -27,8 +27,15 @@
 #include <rapidjson/prettywriter.h>
 #include <thrift/protocol/TDebugProtocol.h>
 
-#include "agent/master_info.h"
+#include "base/testutil/sync_point.h"
+#include "base/time/time.h"
+#include "base/uid_util.h"
+#include "base/utility/defer_op.h"
+#include "common/config_ingest_fwd.h"
+#include "common/config_rpc_client_fwd.h"
 #include "common/logging.h"
+#include "common/system/master_info.h"
+#include "common/util/debug_util.h"
 #include "common/utils.h"
 #include "gen_cpp/FrontendService.h"
 #include "gen_cpp/FrontendService_types.h"
@@ -50,16 +57,9 @@
 #include "runtime/stream_load/stream_load_executor.h"
 #include "runtime/stream_load/stream_load_pipe.h"
 #include "runtime/stream_load/transaction_mgr.h"
-#include "testutil/sync_point.h"
+#include "runtime/thrift_rpc_helper.h"
 #include "util/byte_buffer.h"
-#include "util/debug_util.h"
-#include "util/defer_op.h"
 #include "util/json_util.h"
-#include "util/metrics.h"
-#include "util/starrocks_metrics.h"
-#include "util/thrift_rpc_helper.h"
-#include "util/time.h"
-#include "util/uid_util.h"
 
 namespace starrocks {
 
@@ -118,6 +118,14 @@ void TransactionManagerAction::handle(HttpRequest* req) {
 
     if (req->header(HTTP_LABEL_KEY).empty()) {
         return _send_error_reply(req, Status::InvalidArgument(fmt::format("empty label")));
+    }
+
+    // HTTP_TRANSACTION_TYPE header is used for multi-statement transactions and should only be sent to FE
+    // (Frontend) nodes. BE (Backend) nodes cannot process multi-statement transaction requests.
+    if (!req->header(HTTP_TRANSACTION_TYPE).empty()) {
+        return _send_error_reply(
+                req, Status::InvalidArgument(
+                             "Multi-statement transaction requests can only be sent to FE nodes, not BE nodes"));
     }
 
     if (boost::iequals(txn_op, TXN_BEGIN)) {
@@ -215,7 +223,7 @@ void TransactionStreamLoadAction::handle(HttpRequest* req) {
     // For CSV, it supports parsing in stream.
     // For JSON, now the buffer contains a complete json.
     if (ctx->buffer != nullptr && ctx->buffer->pos > 0) {
-        ctx->buffer->flip();
+        ctx->buffer->flip_to_read();
         WARN_IF_ERROR(ctx->body_sink->append(std::move(ctx->buffer)),
                       "append MessageBodySink failed when handle TransactionStreamLoad");
         ctx->buffer = nullptr;
@@ -445,6 +453,14 @@ Status TransactionStreamLoadAction::_parse_request(HttpRequest* http_req, Stream
     } else {
         request.__set_strip_outer_array(false);
     }
+    if (!http_req->header(HTTP_ENVELOPE).empty()) {
+        auto envelope_str = http_req->header(HTTP_ENVELOPE);
+        if (boost::iequals(envelope_str, "debezium")) {
+            request.__set_envelope(TEnvelopeType::DEBEZIUM);
+        } else if (!boost::iequals(envelope_str, "none")) {
+            return Status::InvalidArgument(fmt::format("Unknown envelope type: {}", envelope_str));
+        }
+    }
     if (http_req->header(HTTP_PARTIAL_UPDATE) == "true") {
         request.__set_partial_update(true);
     } else {
@@ -491,17 +507,25 @@ Status TransactionStreamLoadAction::_parse_request(HttpRequest* http_req, Stream
 }
 
 Status TransactionStreamLoadAction::_exec_plan_fragment(HttpRequest* http_req, StreamLoadContext* ctx) {
-    if (ctx->is_channel_stream_load_context()) {
-        return Status::OK();
-    }
     TStreamLoadPutRequest request;
     RETURN_IF_ERROR(_parse_request(http_req, ctx, request));
+    // Enforce request parameter consistency across multiple HTTP calls of the same transaction.
+    // A streaming load may arrive in several requests (e.g., chunked uploads). We cache the first
+    // TStreamLoadPutRequest in ctx->request and require subsequent requests to be identical
+    // (headers like columns, format, separators, partitions, etc.). This prevents parameter drift
+    // that could lead to undefined behavior or loading into an unexpected schema.
+    // Note: For channel stream load, this check still applies; planning is skipped later.
     if (ctx->request.db != "") {
         if (ctx->request != request) {
             return Status::InternalError("load request not equal last.");
         }
     } else {
         ctx->request = request;
+    }
+    if (ctx->is_channel_stream_load_context()) {
+        // Channel stream load is planned elsewhere; here we only validate request equality above
+        // and return. The data path will proceed without re-planning.
+        return Status::OK();
     }
     // setup stream pipe
     auto pipe = _exec_env->load_stream_mgr()->get(ctx->id);
@@ -597,7 +621,7 @@ void TransactionStreamLoadAction::on_chunk_data(HttpRequest* req) {
             } else {
                 // For non-json format, we could push buffer to the body_sink in streaming mode.
                 // buffer capacity is not enough, so we push the buffer to the pipe and allocate new one.
-                ctx->buffer->flip();
+                ctx->buffer->flip_to_read();
                 auto st = ctx->body_sink->append(std::move(ctx->buffer));
                 if (!st.ok()) {
                     LOG(WARNING) << "append body content failed. errmsg=" << st << " context=" << ctx->brief();

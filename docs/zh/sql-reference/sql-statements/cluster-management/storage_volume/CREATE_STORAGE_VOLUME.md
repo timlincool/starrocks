@@ -8,7 +8,7 @@ displayed_sidebar: docs
 
 为远程存储系统创建存储卷。该功能自 v3.1 起支持。
 
-存储卷由远程存储系统的属性和认证信息组成。您可以在 [StarRocks 存算分离集群](../../../../deployment/shared_data/shared_data.mdx)中创建数据库和云原生表时引用存储卷。
+存储卷由远程存储系统的属性和认证信息组成。您可以在 StarRocks 存算分离集群中创建数据库和云原生表时引用存储卷。
 
 > **注意**
 >
@@ -53,7 +53,7 @@ import Beta from '../../../../_assets/commonMarkdown/_beta.mdx'
 | aws.s3.secret_key                   | 访问 S3 存储空间的 Secret Key。                              |
 | aws.s3.iam_role_arn                 | 有访问 S3 存储空间权限 IAM Role 的 ARN。                     |
 | aws.s3.external_id                  | 用于跨 AWS 账户访问 S3 存储空间的外部 ID。                   |
-| aws.s3.enable_ssl                   | 指定是否启用 SSL 连接。<br />有效值：`true` 和 `false`。默认值：`true`。                   |
+| aws.s3.enable_path_style_access     | 指定是否使用 Path Style 方式访问 S3。<br />有效值：`true` 和 `false`。默认值：`false`。                   |
 | azure.blob.endpoint   | Azure Blob Storage 的链接地址，如 `https://test.blob.core.windows.net`。 |
 | azure.blob.shared_key | 访问 Azure Blob Storage 的共享密钥（Shared Key）。           |
 | azure.blob.sas_token  | 访问 Azure Blob Storage 的共享访问签名（SAS）。              |
@@ -62,7 +62,8 @@ import Beta from '../../../../_assets/commonMarkdown/_beta.mdx'
 | azure.adls2.sas_token  | 访问 Azure Data Lake Storage Gen2 的共享访问签名（SAS）。              |
 | azure.adls2.oauth2_use_managed_identity | 是否使用 Managed Identity 用于授权 Azure Data Lake Storage Gen2 请求。默认值：`false`。 |
 | azure.adls2.oauth2_tenant_id        | 用于授权 Azure Data Lake Storage Gen2 请求的 Managed Identity 的 Tenant ID。 |
-| azure.adls2.oauth2_client_id        | 用于授权 Azure Data Lake Storage Gen2 请求的 Managed Identity 的 Client ID。 |
+| azure.adls2.oauth2_client_id        | <ul><li>对于托管身份验证：用于授权 Azure Data Lake Storage Gen2 请求的 Managed Identity 的 Client ID。</li><li>对于 Workload Identity：与 Workload Identity 关联的 Azure AD 应用程序（用户分配的托管身份或应用程序注册）的客户端 ID（应用程序 ID）。</li></ul> |
+| azure.adls2.oauth2_token_file       | Azure Workload Identity Webhook 投射到 Pod 中的 OAuth2 令牌文件的绝对文件路径。 |
 | gcp.gcs.service_account_email	      | 创建 Service Account 时生成的 JSON 文件中的 Email。示例：`user@hello.iam.gserviceaccount.com`。 |
 | gcp.gcs.service_account_private_key_id | 创建 Service Account 时生成的 JSON 文件中的 Private Key ID。 |
 | gcp.gcs.service_account_private_key | 创建 Service Account 时生成的 JSON 文件中的 Private Key。示例：`-----BEGIN PRIVATE KEY----xxxx-----END PRIVATE KEY-----\n`。 |
@@ -308,6 +309,16 @@ StarRocks 自 v3.4.1 起支持基于 Azure Data Lake Storage Gen2 创建存储�
   "azure.adls2.oauth2_client_id" = "<client_id>" 
   ```
 
+- 如果您使用 Workload Identity 认证，请设置以下 PROPERTIES：
+
+  ```SQL
+  "enabled" = "{ true | false }",
+  "azure.adls2.endpoint" = "<endpoint_url>",
+  "azure.adls2.oauth2_token_file" = "<path_to_token>",
+  "azure.adls2.oauth2_tenant_id" = "<service_principal_tenant_id>",
+  "azure.adls2.oauth2_client_id" = "<service_client_id>"
+  ```
+
 :::note
 不支持 Azure Data Lake Storage Gen1。
 :::
@@ -426,7 +437,7 @@ StarRocks 自 v3.4.1 起支持基于 Azure Data Lake Storage Gen2 创建存储�
 
 ##### 分区前缀
 
-自 v3.2.4 起，StarRocks 支持基于兼容 S3 的对象存储系统创建带有分区前缀功能的存储卷。当启用此功能时，StarRocks 会将数据存储在存储桶下多个使用统一前缀的分区（子路径）中。由于存储桶的 QPS 或吞吐量限制是基于单个分区设置的，此举可以轻松提高 StarRocks 对存储桶中数据文件的读写性能。
+自 v3.2.4 起，StarRocks 支持基于兼容 S3 的对象存储系统创建带有分区前缀功能的存储卷。当启用此功能时，StarRocks 会将数据存储在存储桶下多个使用统一前缀的分区（子路径）中。
 
 如需启用此功能，除了上述与凭证相关的参数之外，您还需要设置以下属性：
 

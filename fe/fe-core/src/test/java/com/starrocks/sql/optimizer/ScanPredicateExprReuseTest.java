@@ -212,7 +212,7 @@ public class ScanPredicateExprReuseTest extends PlanTestBase {
                     + "  1:Project\n"
                     + "  |  output columns:\n"
                     + "  |  1 <-> [1: k, BIGINT, false]\n"
-                    + "  |  12 <-> [6: v5, struct<a int(11), b struct<a array<bigint(20)>>>, true].b.a[false]\n"
+                    + "  |  12 <-> [6: v5, struct<`a` int(11), `b` struct<`a` array<bigint(20)>>>, true].b.a[false]\n"
                     + "  |  cardinality: 1");
             assertContains(plan, "ColumnAccessPath: [/v5/b/a]");
         }
@@ -305,15 +305,49 @@ public class ScanPredicateExprReuseTest extends PlanTestBase {
                     + "  |  1 <-> [1: k, BIGINT, false]\n"
                     + "  |  11 <-> cardinality[([2: v1, ARRAY<BIGINT>, true]); args: INVALID_TYPE; result: INT; args nullable: "
                     + "true; result nullable: true]\n"
-                    + "  |  12 <-> cardinality[([6: v5, struct<a int(11), b struct<a array<bigint(20)>>>, true].b.a[true]); "
+                    + "  |  12 <-> cardinality[([6: v5, struct<`a` int(11), `b` "
+                    + "struct<`a` array<bigint(20)>>>, true].b.a[true]); "
                     + "args: INVALID_TYPE; result: INT; args nullable: true; result nullable: true]\n"
                     + "  |  13 <-> cardinality[([7: v6, MAP<INT,INT>, true]); args: INVALID_TYPE; result: INT; args nullable: "
                     + "true; result nullable: true]\n"
                     + "  |  cardinality: 1");
             assertContains(plan, "     Pruned type: 2 <-> [ARRAY<BIGINT>]\n" +
-                    "     Pruned type: 6 <-> [struct<a int(11), b struct<a array<bigint(20)>>>]\n" +
+                    "     Pruned type: 6 <-> [struct<`a` int(11), `b` struct<`a` array<bigint(20)>>>]\n" +
                     "     Pruned type: 7 <-> [MAP<INT,INT>]\n" +
                     "     ColumnAccessPath: [/v1/OFFSET, /v5/b/a/OFFSET, /v6/OFFSET]");
+        }
+        {
+            String sql = "select * from tarray where " +
+                    "(case when array_length(v3) < 8 then 0 when array_length(v3) < 16 then 1 end) >= 1";
+            String plan = getFragmentPlan(sql);
+            assertContains(plan, "  2:SELECT\n" +
+                    "  |  predicates: CASE WHEN 4: array_length < 8 THEN 0 WHEN 4: array_length < 16 THEN 1 END >= 1\n" +
+                    "  |  \n" +
+                    "  1:Project\n" +
+                    "  |  <slot 1> : 1: v1\n" +
+                    "  |  <slot 2> : 2: v2\n" +
+                    "  |  <slot 3> : 3: v3\n" +
+                    "  |  <slot 4> : array_length(3: v3)");
+        }
+        {
+            String sql = "select * from tarray where (case array_length(v3) when 1 then v1 when 2 then v2 end) >= 10";
+            String plan = getFragmentPlan(sql);
+            assertContains(plan, "  2:SELECT\n" +
+                    "  |  predicates: CASE 4: array_length WHEN 1 THEN 1: v1 WHEN 2 THEN 2: v2 END >= 10\n" +
+                    "  |  \n" +
+                    "  1:Project\n" +
+                    "  |  <slot 1> : 1: v1\n" +
+                    "  |  <slot 2> : 2: v2\n" +
+                    "  |  <slot 3> : 3: v3\n" +
+                    "  |  <slot 4> : array_length(3: v3)");
+        }
+        {
+            String sql = "select * from t0 where (case when v1 > 1 then v1 + 10 when v1 > 2 then v1 + 20 else v1 end) = 2";
+            String plan = getFragmentPlan(sql);
+            assertContains(plan, "  0:OlapScanNode\n" +
+                    "     TABLE: t0\n" +
+                    "     PREAGGREGATION: ON\n" +
+                    "     PREDICATES: CASE WHEN 1: v1 > 1 THEN 1: v1 + 10 WHEN 1: v1 > 2 THEN 1: v1 + 20 ELSE 1: v1 END = 2");
         }
     }
 

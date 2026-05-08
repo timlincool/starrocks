@@ -15,18 +15,20 @@
 #pragma once
 
 #include "cache/cache_metrics.h"
-#include "cache/local_cache_engine.h"
+#include "cache/disk_cache/starcache_engine.h"
 #include "gen_cpp/DataCache_types.h"
-#include "storage/options.h"
 
 namespace starrocks {
 
+class DataCacheMemMetrics;
+
 class DataCacheUtils {
 public:
-    static void set_metrics_from_thrift(TDataCacheMetrics& t_metrics, const DataCacheMetrics& metrics);
+    static void set_metrics_to_thrift(TDataCacheMetrics& t_metrics, const DataCacheDiskMetrics& metrics);
+    static void set_metrics_to_thrift(TDataCacheMetrics& t_metrics, const DataCacheMemMetrics& metrics);
 
 #ifdef WITH_STARCACHE
-    static void set_metrics_from_thrift(TDataCacheMetrics& t_metrics, const StarCacheMetrics& metrics);
+    static void set_disk_metrics_to_thrift(TDataCacheMetrics& t_metrics, const StarCacheMetrics& metrics);
 #endif
 
     static Status parse_conf_datacache_mem_size(const std::string& conf_mem_size_str, int64_t mem_limit,
@@ -47,7 +49,7 @@ public:
 #ifdef USE_STAROS
     // for each dir in `store_paths`, get each corresponding dir in `starlet_cache_dir`
     static StatusOr<std::vector<std::string>> get_corresponding_starlet_cache_dir(
-            const std::vector<StorePath>& store_paths, const std::string& starlet_cache_dir);
+            const std::vector<std::string>& store_paths, const std::string& starlet_cache_dir);
 #endif
 };
 

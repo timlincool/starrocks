@@ -71,6 +71,7 @@ static const std::string HTTP_JSONPATHS = "jsonpaths";
 static const std::string HTTP_JSONROOT = "json_root";
 static const std::string HTTP_IGNORE_JSON_SIZE = "ignore_json_size";
 static const std::string HTTP_STRIP_OUTER_ARRAY = "strip_outer_array";
+static const std::string HTTP_ENVELOPE = "envelope";
 static const std::string HTTP_PARTIAL_UPDATE = "partial_update";
 static const std::string HTTP_TRANSMISSION_COMPRESSION_TYPE = "transmission_compression_type";
 static const std::string HTTP_LOAD_DOP = "load_dop";
@@ -78,6 +79,7 @@ static const std::string HTTP_ENABLE_REPLICATED_STORAGE = "enable_replicated_sto
 static const std::string HTTP_MERGE_CONDITION = "merge_condition";
 static const std::string HTTP_LOG_REJECTED_RECORD_NUM = "log_rejected_record_num";
 static const std::string HTTP_PARTIAL_UPDATE_MODE = "partial_update_mode";
+static const std::string HTTP_TRANSACTION_TYPE = "transaction_type";
 
 static const std::string HTTP_100_CONTINUE = "100-continue";
 static const std::string HTTP_CHANNEL_ID = "channel_id";

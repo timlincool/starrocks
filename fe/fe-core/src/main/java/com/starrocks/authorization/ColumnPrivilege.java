@@ -19,12 +19,12 @@ import com.starrocks.catalog.BasicTable;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.InternalCatalog;
 import com.starrocks.catalog.Table;
+import com.starrocks.catalog.TableName;
 import com.starrocks.catalog.View;
 import com.starrocks.catalog.system.SystemTable;
 import com.starrocks.connector.metadata.MetadataTable;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
-import com.starrocks.sql.StatementPlanner;
 import com.starrocks.sql.analyzer.Analyzer;
 import com.starrocks.sql.analyzer.Authorizer;
 import com.starrocks.sql.ast.AstTraverser;
@@ -34,7 +34,6 @@ import com.starrocks.sql.ast.QueryStatement;
 import com.starrocks.sql.ast.TableRelation;
 import com.starrocks.sql.ast.UpdateStmt;
 import com.starrocks.sql.ast.ViewRelation;
-import com.starrocks.sql.ast.expression.TableName;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptExpressionVisitor;
 import com.starrocks.sql.optimizer.Optimizer;
@@ -107,7 +106,7 @@ public class ColumnPrivilege {
              */
             ColumnRefFactory columnRefFactory = new ColumnRefFactory();
             LogicalPlan logicalPlan;
-            MVTransformerContext mvTransformerContext = StatementPlanner.makeMVTransformerContext(context.getSessionVariable());
+            MVTransformerContext mvTransformerContext = MVTransformerContext.of(context, true);
             TransformerContext transformerContext = new TransformerContext(columnRefFactory, context, mvTransformerContext);
             logicalPlan = new RelationTransformer(transformerContext).transformWithSelectLimit(stmt.getQueryRelation());
 
@@ -260,24 +259,27 @@ public class ColumnPrivilege {
         @Override
         public Void visitInsertStatement(InsertStmt node, Void context) {
             Table table = node.getTargetTable();
-            tableNameToTableObj.put(node.getTableName(), table);
-            tableTableNameMap.put(table, node.getTableName());
+            TableName tableName = TableName.fromTableRef(node.getTableRef());
+            tableNameToTableObj.put(tableName, table);
+            tableTableNameMap.put(table, tableName);
             return super.visitInsertStatement(node, context);
         }
 
         @Override
         public Void visitUpdateStatement(UpdateStmt node, Void context) {
             Table table = node.getTable();
-            tableNameToTableObj.put(node.getTableName(), table);
-            tableTableNameMap.put(table, node.getTableName());
+            TableName tableName = TableName.fromTableRef(node.getTableRef());
+            tableNameToTableObj.put(tableName, table);
+            tableTableNameMap.put(table, tableName);
             return super.visitUpdateStatement(node, context);
         }
 
         @Override
         public Void visitDeleteStatement(DeleteStmt node, Void context) {
             Table table = node.getTable();
-            tableNameToTableObj.put(node.getTableName(), table);
-            tableTableNameMap.put(table, node.getTableName());
+            TableName tableName = TableName.fromTableRef(node.getTableRef());
+            tableNameToTableObj.put(tableName, table);
+            tableTableNameMap.put(table, tableName);
             return super.visitDeleteStatement(node, context);
         }
 

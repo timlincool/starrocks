@@ -17,7 +17,7 @@ package com.starrocks.sql.optimizer.rule.transformation;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.starrocks.sql.ast.expression.JoinOperator;
+import com.starrocks.sql.ast.JoinOperator;
 import com.starrocks.sql.optimizer.OptExpression;
 import com.starrocks.sql.optimizer.OptimizerContext;
 import com.starrocks.sql.optimizer.Utils;
@@ -94,7 +94,8 @@ public class EliminateJoinWithConstantRule extends TransformationRule {
         JoinOperator joinType = joinOperator.getJoinType();
         // anti/full outer join cannot be eliminated.
         // semi join needs to distinct output which cannot be eliminated.
-        if (joinType.isAntiJoin() || joinType.isFullOuterJoin() || joinType.isSemiJoin()) {
+        // ASOF join has temporal ordering semantics and cannot be eliminated with constants.
+        if (joinType.isAntiJoin() || joinType.isFullOuterJoin() || joinType.isSemiJoin() || joinType.isAsofJoin()) {
             return false;
         }
         if (constantIndex == 0) {
@@ -135,6 +136,13 @@ public class EliminateJoinWithConstantRule extends TransformationRule {
                 ScalarOperator t = transformOuterJoinOnPredicate(joinOperator, value, rewrittenCondition);
                 outputs.put(key, t);
             });
+            // For outer join, if predicate references constant-side columns, we need to rewrite
+            // the predicate using the CASE WHEN expressions in outputs instead of constant values.
+            // This is because the constant-side columns are now represented as CASE WHEN expressions.
+            if (predicate != null) {
+                ReplaceColumnRefRewriter outputRewriter = new ReplaceColumnRefRewriter(outputs);
+                rewrittenPredicate = outputRewriter.rewrite(predicate);
+            }
         } else {
             rewrittenPredicate = Utils.compoundAnd(rewrittenPredicate, rewrittenCondition);
         }

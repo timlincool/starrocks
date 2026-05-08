@@ -14,13 +14,13 @@
 
 #pragma once
 
-#include <iostream>
+#include <fmt/format.h>
 
-#include "common/logging.h"
+#include <ostream>
+
+#include "base/utility/guard.h"
 #include "gen_cpp/Opcodes_types.h"
 #include "gen_cpp/Types_types.h"
-#include "types/logical_type.h"
-#include "util/guard.h"
 
 namespace starrocks {
 
@@ -134,7 +134,7 @@ constexpr bool is_string_type(LogicalType type) {
 
 constexpr bool is_object_type(LogicalType type) {
     return type == LogicalType::TYPE_HLL || type == LogicalType::TYPE_OBJECT || type == LogicalType::TYPE_JSON ||
-           type == LogicalType::TYPE_PERCENTILE;
+           type == LogicalType::TYPE_PERCENTILE || type == TYPE_VARIANT;
 }
 
 inline bool is_decimalv3_field_type(LogicalType type) {
@@ -327,7 +327,8 @@ VALUE_GUARD(LogicalType, BinaryLTGuard, lt_is_binary, TYPE_BINARY, TYPE_VARBINAR
 VALUE_GUARD(LogicalType, JsonGuard, lt_is_json, TYPE_JSON)
 VALUE_GUARD(LogicalType, VariantGuard, lt_is_variant, TYPE_VARIANT)
 VALUE_GUARD(LogicalType, FunctionGuard, lt_is_function, TYPE_FUNCTION)
-VALUE_GUARD(LogicalType, ObjectFamilyLTGuard, lt_is_object_family, TYPE_JSON, TYPE_HLL, TYPE_OBJECT, TYPE_PERCENTILE)
+VALUE_GUARD(LogicalType, ObjectFamilyLTGuard, lt_is_object_family, TYPE_JSON, TYPE_HLL, TYPE_OBJECT, TYPE_PERCENTILE,
+            TYPE_VARIANT)
 VALUE_GUARD(LogicalType, ArrayGuard, lt_is_array, TYPE_ARRAY)
 VALUE_GUARD(LogicalType, MapGuard, lt_is_map, TYPE_MAP)
 VALUE_GUARD(LogicalType, StructGurad, lt_is_struct, TYPE_STRUCT)
@@ -365,7 +366,7 @@ UNION_VALUE_GUARD(LogicalType, AggregateComplexLTGuard, lt_is_complex_aggregate,
                   lt_is_decimalv2_struct, lt_is_decimal_struct, lt_is_datetime_struct, lt_is_date_struct,
                   lt_is_json_struct)
 
-UNION_VALUE_GUARD(LogicalType, StringOrBinaryGaurd, lt_is_string_or_binary, lt_is_string_struct, lt_is_binary_struct)
+UNION_VALUE_GUARD(LogicalType, StringOrBinaryGuard, lt_is_string_or_binary, lt_is_string_struct, lt_is_binary_struct)
 
 TExprOpcode::type to_in_opcode(LogicalType t);
 LogicalType thrift_to_type(TPrimitiveType::type ttype);
@@ -388,3 +389,8 @@ inline std::ostream& operator<<(std::ostream& os, starrocks::LogicalType type) {
     os << starrocks::logical_type_to_string(type);
     return os;
 }
+
+template <>
+struct fmt::formatter<starrocks::LogicalType> : formatter<std::string_view> {
+    auto format(starrocks::LogicalType value, format_context& ctx) const -> format_context::iterator;
+};

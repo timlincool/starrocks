@@ -21,26 +21,29 @@
 
 #include "absl/status/statusor.h"
 #include "absl/strings/str_split.h"
+#include "base/string/parse_util.h"
+#include "cache/mem_cache/local_mem_cache_engine.h"
 #include "fs/fs.h"
 #include "gutil/strings/split.h"
-#include "util/parse_util.h"
 
 namespace starrocks {
-void DataCacheUtils::set_metrics_from_thrift(TDataCacheMetrics& t_metrics, const DataCacheMetrics& metrics) {
+
+void DataCacheUtils::set_metrics_to_thrift(TDataCacheMetrics& t_metrics, const DataCacheDiskMetrics& metrics) {
     t_metrics.__set_status(DataCacheStatusUtils::to_thrift(metrics.status));
     t_metrics.__set_disk_quota_bytes(metrics.disk_quota_bytes);
     t_metrics.__set_disk_used_bytes(metrics.disk_used_bytes);
+}
+
+void DataCacheUtils::set_metrics_to_thrift(TDataCacheMetrics& t_metrics, const DataCacheMemMetrics& metrics) {
     t_metrics.__set_mem_quota_bytes(metrics.mem_quota_bytes);
     t_metrics.__set_mem_used_bytes(metrics.mem_used_bytes);
 }
 
 #ifdef WITH_STARCACHE
-void DataCacheUtils::set_metrics_from_thrift(TDataCacheMetrics& t_metrics, const StarCacheMetrics& metrics) {
+void DataCacheUtils::set_disk_metrics_to_thrift(TDataCacheMetrics& t_metrics, const StarCacheMetrics& metrics) {
     t_metrics.__set_status(DataCacheStatusUtils::to_thrift(static_cast<DataCacheStatus>(metrics.status)));
     t_metrics.__set_disk_quota_bytes(metrics.disk_quota_bytes);
     t_metrics.__set_disk_used_bytes(metrics.disk_used_bytes);
-    t_metrics.__set_mem_quota_bytes(metrics.mem_quota_bytes);
-    t_metrics.__set_mem_used_bytes(metrics.mem_used_bytes);
 }
 #endif
 
@@ -104,7 +107,7 @@ Status DataCacheUtils::parse_conf_datacache_disk_paths(const std::string& config
             continue;
         }
 
-        string canonicalized_path;
+        std::string canonicalized_path;
         status = FileSystem::Default()->canonicalize(item, &canonicalized_path);
         if (!status.ok()) {
             LOG(WARNING) << "datacache path can not be canonicalized. may be not exist. path: " << item;
@@ -185,7 +188,7 @@ dev_t DataCacheUtils::disk_device_id(const std::string& disk_path) {
 
 #ifdef USE_STAROS
 StatusOr<std::vector<std::string>> DataCacheUtils::get_corresponding_starlet_cache_dir(
-        const std::vector<StorePath>& store_paths, const std::string& starlet_cache_dir) {
+        const std::vector<std::string>& store_paths, const std::string& starlet_cache_dir) {
     std::vector<std::string> corresponding_starlet_dirs;
     if (starlet_cache_dir.empty()) {
         return corresponding_starlet_dirs;
@@ -216,8 +219,7 @@ StatusOr<std::vector<std::string>> DataCacheUtils::get_corresponding_starlet_cac
         }
     }
 
-    for (auto& store_path : store_paths) {
-        std::string root_path = store_path.path;
+    for (auto& root_path : store_paths) {
         auto id = DataCacheUtils::disk_device_id(root_path);
         if (id == 0) {
             std::string error_str =

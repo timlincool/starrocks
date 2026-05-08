@@ -14,13 +14,21 @@
 
 package com.starrocks.scheduler.mv.ivm;
 
+import com.google.common.collect.ImmutableList;
+import com.starrocks.common.tvr.TvrDeltaStats;
+import com.starrocks.common.tvr.TvrTableDelta;
+import com.starrocks.common.tvr.TvrTableDeltaTrait;
 import com.starrocks.common.tvr.TvrTableSnapshot;
+import com.starrocks.common.tvr.TvrVersion;
+import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.iceberg.MockIcebergMetadata;
+import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.plan.ConnectorPlanTestBase;
 import mockit.Mock;
 import mockit.MockUp;
 import org.junit.jupiter.api.BeforeAll;
 
+import java.util.List;
 import java.util.Optional;
 
 public class MVIVMIcebergTestBase extends MVIVMTestBase {
@@ -37,6 +45,52 @@ public class MVIVMIcebergTestBase extends MVIVMTestBase {
             @Mock
             public TvrTableSnapshot getCurrentTvrSnapshot(String dbName, com.starrocks.catalog.Table table) {
                 return TvrTableSnapshot.of(Optional.of(toVersion));
+            }
+        };
+    }
+
+    public void mockListTableDeltaTraits(List<TvrTableDeltaTrait> expects) {
+        new MockUp<MockIcebergMetadata>() {
+            @Mock
+            public List<TvrTableDeltaTrait> listTableDeltaTraits(String dbName, com.starrocks.catalog.Table table,
+                                                                 TvrTableSnapshot fromSnapshotExclusive,
+                                                                 TvrTableSnapshot toSnapshotInclusive) {
+                return expects;
+            }
+        };
+    }
+
+    public void mockListTableDeltaTraits() {
+        List<TvrTableDeltaTrait> deltas = ImmutableList.of(
+                TvrTableDeltaTrait.ofMonotonic(
+                        TvrTableDelta.of(TvrVersion.of(0L), TvrVersion.of(1L)),
+                        TvrDeltaStats.EMPTY),
+                TvrTableDeltaTrait.ofRetractable(
+                        TvrTableDelta.of(TvrVersion.of(1L), TvrVersion.of(2L)),
+                        TvrDeltaStats.EMPTY)
+        );
+        mockListTableDeltaTraits(deltas);
+    }
+
+    public void mockListTableDeltaTraitsThrows(String message) {
+        new MockUp<MockIcebergMetadata>() {
+            @Mock
+            public List<TvrTableDeltaTrait> listTableDeltaTraits(String dbName, com.starrocks.catalog.Table table,
+                                                                 TvrTableSnapshot fromSnapshotExclusive,
+                                                                 TvrTableSnapshot toSnapshotInclusive) {
+                throw new SemanticException(message);
+            }
+        };
+    }
+
+    /** Simulate the connector layer's snapshot-ancestry error (e.g. expire_snapshots, branch reset). */
+    public void mockListTableDeltaTraitsThrowsConnector(String message) {
+        new MockUp<MockIcebergMetadata>() {
+            @Mock
+            public List<TvrTableDeltaTrait> listTableDeltaTraits(String dbName, com.starrocks.catalog.Table table,
+                                                                 TvrTableSnapshot fromSnapshotExclusive,
+                                                                 TvrTableSnapshot toSnapshotInclusive) {
+                throw new StarRocksConnectorException(message);
             }
         };
     }

@@ -37,13 +37,16 @@ package com.starrocks.alter;
 import com.starrocks.sql.ast.AddColumnClause;
 import com.starrocks.sql.ast.AddColumnsClause;
 import com.starrocks.sql.ast.AddFieldClause;
+import com.starrocks.sql.ast.AddMVColumnClause;
 import com.starrocks.sql.ast.AddPartitionClause;
 import com.starrocks.sql.ast.AddRollupClause;
 import com.starrocks.sql.ast.AlterClause;
+import com.starrocks.sql.ast.AlterTableAutoIncrementClause;
 import com.starrocks.sql.ast.CreateIndexClause;
 import com.starrocks.sql.ast.DropColumnClause;
 import com.starrocks.sql.ast.DropFieldClause;
 import com.starrocks.sql.ast.DropIndexClause;
+import com.starrocks.sql.ast.DropMVColumnClause;
 import com.starrocks.sql.ast.DropRollupClause;
 import com.starrocks.sql.ast.ModifyColumnClause;
 import com.starrocks.sql.ast.ModifyColumnCommentClause;
@@ -60,6 +63,8 @@ public enum AlterOpType {
     ADD_PARTITION,
     // Optimize table
     OPTIMIZE,
+    // ALTER AUTO_INCREMENT counter
+    ALTER_AUTO_INCREMENT,
     // ALTER_OTHER must be the last one
     ALTER_OTHER,
     // INVALID_OP must be the last one
@@ -94,8 +99,10 @@ public enum AlterOpType {
         if (alterClause instanceof AddColumnClause ||
                 alterClause instanceof AddColumnsClause ||
                 alterClause instanceof AddFieldClause ||
+                alterClause instanceof AddMVColumnClause ||
                 alterClause instanceof CreateIndexClause ||
                 alterClause instanceof DropColumnClause ||
+                alterClause instanceof DropMVColumnClause ||
                 alterClause instanceof DropFieldClause ||
                 alterClause instanceof DropIndexClause ||
                 alterClause instanceof ModifyColumnClause ||
@@ -110,6 +117,8 @@ public enum AlterOpType {
             return DROP_ROLLUP;
         } else if (alterClause instanceof OptimizeClause) {
             return OPTIMIZE;
+        } else if (alterClause instanceof AlterTableAutoIncrementClause) {
+            return ALTER_AUTO_INCREMENT;
         }
 
         return ALTER_OTHER;

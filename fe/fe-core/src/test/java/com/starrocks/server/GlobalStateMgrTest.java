@@ -62,11 +62,14 @@ import mockit.Expectations;
 import mockit.Mock;
 import mockit.MockUp;
 import mockit.Mocked;
+import org.apache.commons.io.FileUtils;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.io.File;
 import java.lang.reflect.Field;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
@@ -78,11 +81,21 @@ import java.util.concurrent.ConcurrentHashMap;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class GlobalStateMgrTest {
+    private String testMetaDir;
+    private String testPluginDir;
 
     @BeforeEach
     public void setUp() {
-        Config.meta_dir = UUID.randomUUID().toString();
-        Config.plugin_dir = UUID.randomUUID().toString();
+        testMetaDir = UUID.randomUUID().toString();
+        testPluginDir = UUID.randomUUID().toString();
+        Config.meta_dir = testMetaDir;
+        Config.plugin_dir = testPluginDir;
+    }
+
+    @AfterEach
+    public void tearDown() throws Exception {
+        FileUtils.deleteQuietly(new File(testMetaDir));
+        FileUtils.deleteQuietly(new File(testPluginDir));
     }
 
     @Test
@@ -125,30 +138,14 @@ public class GlobalStateMgrTest {
         return globalStateMgr;
     }
 
-    @Test
-    public void testReplayUpdateFrontend() throws Exception {
-        GlobalStateMgr globalStateMgr = mockGlobalStateMgr();
-        List<Frontend> frontends = globalStateMgr.getNodeMgr().getFrontends(null);
-        Frontend fe = frontends.get(0);
-        fe.updateHostAndEditLogPort("testHost", 1000);
-        globalStateMgr.getNodeMgr().replayUpdateFrontend(fe);
-        List<Frontend> updatedFrontends = globalStateMgr.getNodeMgr().getFrontends(null);
-        Frontend updatedfFe = updatedFrontends.get(0);
-        Assertions.assertEquals("testHost", updatedfFe.getHost());
-        Assertions.assertTrue(updatedfFe.getEditLogPort() == 1000);
-    }
-
     @Mocked
     BDBEnvironment env;
 
     @Mocked
     ReplicationGroupAdmin replicationGroupAdmin;
 
-    @Mocked
-    EditLog editLog;
-
     @Test
-    public void testUpdateFrontend() throws Exception {
+    public void testUpdateFrontend(@Mocked EditLog editLog) throws Exception {
 
         new Expectations() {
             {
@@ -165,12 +162,6 @@ public class GlobalStateMgrTest {
                     MemberNotFoundException,
                     ReplicaStateException,
                     UnknownMasterException {
-            }
-        };
-
-        new MockUp<EditLog>() {
-            @Mock
-            public void logUpdateFrontend(Frontend fe) {
             }
         };
 
@@ -254,6 +245,96 @@ public class GlobalStateMgrTest {
         Config.metadata_enable_recovery_mode = originVal;
     }
 
+    @Test
+    public void testLeaderLeaseActivation() {
+        GlobalStateMgr globalStateMgr = new GlobalStateMgr(new NodeMgr());
+        globalStateMgr.beginLeaderActivation();
+        Assertions.assertEquals(GlobalStateMgr.LeaderRoleState.ACTIVATING, globalStateMgr.getLeaderRoleState());
+        Assertions.assertFalse(globalStateMgr.isLeaderWorkAdmissionOpen());
+        Assertions.assertEquals(LeaderLease.INVALID, globalStateMgr.captureLeaderLease());
+
+        globalStateMgr.setFrontendNodeType(FrontendNodeType.LEADER);
+        globalStateMgr.publishLeaderLease(101L);
+
+        LeaderLease lease = globalStateMgr.captureLeaderLeaseOrThrow();
+        Assertions.assertEquals(101L, lease.getHaEpoch());
+        Assertions.assertEquals(1L, lease.getGeneration());
+        Assertions.assertTrue(globalStateMgr.isLeaderLeaseValid(lease));
+        Assertions.assertTrue(globalStateMgr.isLeaderWorkAdmissionOpen());
+        Assertions.assertEquals(GlobalStateMgr.LeaderRoleState.ACTIVE, globalStateMgr.getLeaderRoleState());
+        Assertions.assertNull(globalStateMgr.getPendingDemotionTargetType());
+    }
+
+    @Test
+    public void testLeaderLeaseActivationAllowsEpochZero() {
+        GlobalStateMgr globalStateMgr = new GlobalStateMgr(new NodeMgr());
+        globalStateMgr.beginLeaderActivation();
+        globalStateMgr.setFrontendNodeType(FrontendNodeType.LEADER);
+        globalStateMgr.publishLeaderLease(0L);
+
+        LeaderLease lease = globalStateMgr.captureLeaderLeaseOrThrow();
+        Assertions.assertEquals(0L, lease.getHaEpoch());
+        Assertions.assertTrue(lease.isValid());
+        Assertions.assertTrue(globalStateMgr.isLeaderLeaseValid(lease));
+    }
+
+    @Test
+    public void testLeaderLeaseInvalidatedByDemotionSkeleton() {
+        GlobalStateMgr globalStateMgr = new GlobalStateMgr(new NodeMgr());
+        globalStateMgr.beginLeaderActivation();
+        globalStateMgr.setFrontendNodeType(FrontendNodeType.LEADER);
+        globalStateMgr.publishLeaderLease(102L);
+        LeaderLease lease = globalStateMgr.captureLeaderLeaseOrThrow();
+
+        globalStateMgr.beginLeaderDemotion(FrontendNodeType.FOLLOWER);
+
+        Assertions.assertFalse(globalStateMgr.isLeaderWorkAdmissionOpen());
+        Assertions.assertTrue(globalStateMgr.isLeaderDemoting());
+        Assertions.assertFalse(globalStateMgr.isLeaderLeaseValid(lease));
+        Assertions.assertEquals(LeaderLease.INVALID, globalStateMgr.captureLeaderLease());
+        Assertions.assertEquals(GlobalStateMgr.LeaderRoleState.DEMOTING, globalStateMgr.getLeaderRoleState());
+        Assertions.assertEquals(FrontendNodeType.FOLLOWER, globalStateMgr.getPendingDemotionTargetType());
+        Assertions.assertThrows(IllegalStateException.class, globalStateMgr::captureLeaderLeaseOrThrow);
+    }
+
+    @Test
+    public void testLeaderGenerationBumpsAcrossDemotionAndReelection() {
+        GlobalStateMgr globalStateMgr = new GlobalStateMgr(new NodeMgr());
+        globalStateMgr.beginLeaderActivation();
+        globalStateMgr.setFrontendNodeType(FrontendNodeType.LEADER);
+        globalStateMgr.publishLeaderLease(103L);
+        LeaderLease firstLease = globalStateMgr.captureLeaderLeaseOrThrow();
+
+        globalStateMgr.beginLeaderDemotion(FrontendNodeType.FOLLOWER);
+        globalStateMgr.setFrontendNodeType(FrontendNodeType.FOLLOWER);
+
+        globalStateMgr.beginLeaderActivation();
+        globalStateMgr.setFrontendNodeType(FrontendNodeType.LEADER);
+        globalStateMgr.publishLeaderLease(104L);
+        LeaderLease secondLease = globalStateMgr.captureLeaderLeaseOrThrow();
+
+        Assertions.assertTrue(secondLease.getGeneration() > firstLease.getGeneration());
+        Assertions.assertEquals(104L, secondLease.getHaEpoch());
+        Assertions.assertFalse(globalStateMgr.isLeaderLeaseValid(firstLease));
+    }
+
+    @Test
+    public void testLeaderLeaseRollbackAfterActivationFailure() {
+        GlobalStateMgr globalStateMgr = new GlobalStateMgr(new NodeMgr());
+        globalStateMgr.beginLeaderActivation();
+        globalStateMgr.setFrontendNodeType(FrontendNodeType.LEADER);
+        globalStateMgr.publishLeaderLease(105L);
+        LeaderLease lease = globalStateMgr.captureLeaderLeaseOrThrow();
+
+        globalStateMgr.rollbackLeaderActivation();
+
+        Assertions.assertFalse(globalStateMgr.isLeaderWorkAdmissionOpen());
+        Assertions.assertFalse(globalStateMgr.isLeaderLeaseValid(lease));
+        Assertions.assertEquals(LeaderLease.INVALID, globalStateMgr.captureLeaderLease());
+        Assertions.assertEquals(GlobalStateMgr.LeaderRoleState.INACTIVE, globalStateMgr.getLeaderRoleState());
+        Assertions.assertNull(globalStateMgr.getPendingDemotionTargetType());
+    }
+
     private static class MyGlobalStateMgr extends GlobalStateMgr {
         public static final String ERROR_MESSAGE = "Create Exception here.";
         private final boolean throwException;
@@ -330,7 +411,6 @@ public class GlobalStateMgrTest {
     public void testReloadTables() throws Exception {
         ConnectContext ctx = UtFrameUtils.initCtxForNewPrivilege(UserIdentity.ROOT);
         UtFrameUtils.createMinStarRocksCluster();
-        UtFrameUtils.setUpForPersistTest();
         GlobalStateMgr currentState = GlobalStateMgr.getCurrentState();
         StarRocksAssert starRocksAssert = new StarRocksAssert();
 

@@ -109,8 +109,7 @@ public class ShowCreateMaterializedViewStmtTest {
                 "\"foreign_key_constraints\" = \"default_catalog.test.tbl1(k1) REFERENCES default_catalog.test.tbl2(k1)\",\n" +
                 "\"storage_medium\" = \"HDD\"\n" +
                 ")\n" +
-                "AS SELECT `tbl1`.`k1`, `tbl2`.`k2`\n" +
-                "FROM `test`.`tbl1` INNER JOIN `test`.`tbl2` ON `tbl1`.`k1` = `tbl2`.`k1`;", createTableStmt.get(0));
+                "AS select tbl1.k1, tbl2.k2 from tbl1 join tbl2 on tbl1.k1 = tbl2.k1;", createTableStmt.get(0));
     }
 
     @Test
@@ -137,8 +136,7 @@ public class ShowCreateMaterializedViewStmtTest {
                         "\"foreign_key_constraints\" = \"hive0.partitioned_db.t1(c2) REFERENCES hive0.partitioned_db2.t2(c2)\",\n" +
                         "\"storage_medium\" = \"HDD\"\n" +
                         ")\n" +
-                        "AS SELECT `hive0`.`partitioned_db2`.`t2`.`c1`, `hive0`.`partitioned_db`.`t1`.`c2`\n" +
-                        "FROM `hive0`.`partitioned_db`.`t1` INNER JOIN `hive0`.`partitioned_db2`.`t2` ON `hive0`.`partitioned_db`.`t1`.`c2` = `hive0`.`partitioned_db2`.`t2`.`c2`;",
+                        "AS select t2.c1, t1.c2 from hive0.partitioned_db.t1 join hive0.partitioned_db2.t2 on t1.c2 = t2.c2;",
                 createTableStmt.get(0));
     }
 
@@ -165,8 +163,7 @@ public class ShowCreateMaterializedViewStmtTest {
                         "\"replication_num\" = \"1\",\n" +
                         "\"storage_medium\" = \"HDD\"\n" +
                         ")\n" +
-                        "AS SELECT `lineitem`.`l_orderkey`, `lineitem`.`l_partkey`, `lineitem`.`l_shipdate`\n" +
-                        "FROM `hive0`.`tpch`.`lineitem`;");
+                        "AS select l_orderkey,l_partkey,l_shipdate from hive0.tpch.lineitem;");
         ctx.getGlobalStateMgr().setMetadataMgr(oldMetadataMgr);
     }
 
@@ -240,13 +237,46 @@ public class ShowCreateMaterializedViewStmtTest {
         Assertions.assertThrows(SemanticException.class, () -> table.getUniqueConstraints().get(0).getUniqueColumnNames(table));
     }
 
+    @Test
+    public void testAsyncIsSynonymForScheduleAndShowCreatePrefersSchedule() throws Exception {
+        final String mvName = "test_mv_async_synonym";
+        starRocksAssert.ddl("drop materialized view if exists " + mvName);
+        // ASYNC must remain accepted as a synonym.
+        starRocksAssert.withMaterializedView("CREATE MATERIALIZED VIEW " + mvName +
+                " DISTRIBUTED BY HASH(`k1`) BUCKETS 3" +
+                " REFRESH ASYNC EVERY(INTERVAL 1 HOUR)" +
+                " AS SELECT k1, k2 FROM test.tbl1");
+        MaterializedView mv = starRocksAssert.getMv(starRocksAssert.getCtx().getDatabase(), mvName);
+        List<String> ddl = Lists.newArrayList();
+        AstToStringBuilder.getDdlStmt(mv, ddl, null, null, false, true);
+        Assertions.assertTrue(ddl.get(0).contains("REFRESH SCHEDULE EVERY(INTERVAL 1 HOUR)"),
+                "SHOW CREATE should display SCHEDULE, got: " + ddl.get(0));
+        Assertions.assertFalse(ddl.get(0).contains("REFRESH ASYNC"),
+                "SHOW CREATE should not display ASYNC, got: " + ddl.get(0));
+        starRocksAssert.dropMaterializedView(mvName);
+
+        // SCHEDULE should also parse and produce the same display.
+        starRocksAssert.withMaterializedView("CREATE MATERIALIZED VIEW " + mvName +
+                " DISTRIBUTED BY HASH(`k1`) BUCKETS 3" +
+                " REFRESH SCHEDULE EVERY(INTERVAL 1 HOUR)" +
+                " AS SELECT k1, k2 FROM test.tbl1");
+        mv = starRocksAssert.getMv(starRocksAssert.getCtx().getDatabase(), mvName);
+        ddl.clear();
+        AstToStringBuilder.getDdlStmt(mv, ddl, null, null, false, true);
+        Assertions.assertTrue(ddl.get(0).contains("REFRESH SCHEDULE EVERY(INTERVAL 1 HOUR)"),
+                "SHOW CREATE should display SCHEDULE, got: " + ddl.get(0));
+        starRocksAssert.dropMaterializedView(mvName);
+    }
+
     public static Stream<Arguments> genTestArguments() {
+        // Bare ASYNC (without EVERY) is the legacy form retained for backward compatibility;
+        // SCHEDULE is the preferred keyword for scheduled refresh and requires EVERY.
         List<String> refreshArgumentsList = Lists.newArrayList(
                 "REFRESH MANUAL",
                 "REFRESH DEFERRED MANUAL",
                 "REFRESH ASYNC",
-                "REFRESH ASYNC EVERY(INTERVAL 1 HOUR)",
-                "REFRESH ASYNC START(\"1998-01-01 00:00:00\") EVERY(INTERVAL 1 HOUR)"
+                "REFRESH SCHEDULE EVERY(INTERVAL 1 HOUR)",
+                "REFRESH SCHEDULE START(\"1998-01-01 00:00:00\") EVERY(INTERVAL 1 HOUR)"
         );
         List<String> orderByList = Lists.newArrayList("", "ORDER BY (k3)");
         List<String> propertiesList = Lists.newArrayList(

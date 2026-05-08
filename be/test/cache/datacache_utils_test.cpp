@@ -14,34 +14,35 @@
 
 #include "cache/datacache_utils.h"
 
+#include <fmt/format.h>
 #include <gtest/gtest.h>
 
 #include <filesystem>
 
+#include "base/testutil/assert.h"
 #include "fs/fs_util.h"
 #include "gen_cpp/DataCache_types.h"
-#include "testutil/assert.h"
 
 namespace starrocks {
 class DataCacheUtilsTest : public ::testing::Test {};
 
-TEST_F(DataCacheUtilsTest, test_set_metrics_from_thrift) {
+TEST_F(DataCacheUtilsTest, test_add_metrics_from_thrift) {
     TDataCacheMetrics t_metrics{};
-    DataCacheMetrics metrics{};
+    DataCacheDiskMetrics metrics{};
     metrics.status = DataCacheStatus::NORMAL;
-    DataCacheUtils::set_metrics_from_thrift(t_metrics, metrics);
+    DataCacheUtils::set_metrics_to_thrift(t_metrics, metrics);
     ASSERT_EQ(t_metrics.status, TDataCacheStatus::NORMAL);
 
     metrics.status = DataCacheStatus::UPDATING;
-    DataCacheUtils::set_metrics_from_thrift(t_metrics, metrics);
+    DataCacheUtils::set_metrics_to_thrift(t_metrics, metrics);
     ASSERT_EQ(t_metrics.status, TDataCacheStatus::UPDATING);
 
     metrics.status = DataCacheStatus::LOADING;
-    DataCacheUtils::set_metrics_from_thrift(t_metrics, metrics);
+    DataCacheUtils::set_metrics_to_thrift(t_metrics, metrics);
     ASSERT_EQ(t_metrics.status, TDataCacheStatus::LOADING);
 
     metrics.status = DataCacheStatus::ABNORMAL;
-    DataCacheUtils::set_metrics_from_thrift(t_metrics, metrics);
+    DataCacheUtils::set_metrics_to_thrift(t_metrics, metrics);
     ASSERT_EQ(t_metrics.status, TDataCacheStatus::ABNORMAL);
 }
 
@@ -200,8 +201,8 @@ TEST_F(DataCacheUtilsTest, get_corresponding_starlet_cache_dir) {
         std::string storage_dir = "./storage";
         ASSERT_TRUE(fs::create_directories(starlet_dir).ok());
         ASSERT_TRUE(fs::create_directories(storage_dir).ok());
-        std::vector<StorePath> store_paths;
-        store_paths.push_back(StorePath(storage_dir));
+        std::vector<std::string> store_paths;
+        store_paths.push_back(storage_dir);
         auto vec_or = DataCacheUtils::get_corresponding_starlet_cache_dir(store_paths, starlet_dir);
         ASSERT_TRUE(vec_or.ok());
         auto vec = *vec_or;
@@ -244,9 +245,9 @@ TEST_F(DataCacheUtilsTest, get_corresponding_starlet_cache_dir) {
         ASSERT_TRUE(fs::create_directories(starlet_dir).ok());
         ASSERT_TRUE(fs::create_directories(storage_dir).ok());
         ASSERT_TRUE(fs::create_directories(storage_dir2).ok());
-        std::vector<StorePath> store_paths;
-        store_paths.push_back(StorePath(storage_dir));
-        store_paths.push_back(StorePath(storage_dir2));
+        std::vector<std::string> store_paths;
+        store_paths.push_back(storage_dir);
+        store_paths.push_back(storage_dir2);
         auto vec_or = DataCacheUtils::get_corresponding_starlet_cache_dir(store_paths, starlet_dir);
         ASSERT_TRUE(vec_or.ok());
         auto vec = *vec_or;

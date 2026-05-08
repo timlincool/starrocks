@@ -41,6 +41,8 @@ import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.ShowResultMetaFactory;
 import com.starrocks.sql.analyzer.AstToStringBuilder;
 import com.starrocks.sql.analyzer.SemanticException;
+import com.starrocks.sql.analyzer.ShowStmtToSelectStmtConverter;
+import com.starrocks.sql.ast.QueryStatement;
 import com.starrocks.sql.ast.ShowMaterializedViewsStmt;
 import com.starrocks.utframe.StarRocksAssert;
 import com.starrocks.utframe.UtFrameUtils;
@@ -89,7 +91,8 @@ public class ShowMaterializedViewTest {
 
         stmt = (ShowMaterializedViewsStmt) UtFrameUtils.parseStmtWithNewParser(
                 "SHOW MATERIALIZED VIEWS FROM abc where name = 'mv1';", ctx);
-        Preconditions.notNull(stmt.toSelectStmt().getOrigStmt(), "stmt's original stmt should not be null");
+        QueryStatement queryStatement = ShowStmtToSelectStmtConverter.toSelectStmt(stmt);
+        Preconditions.notNull(queryStatement.getOrigStmt(), "stmt's original stmt should not be null");
 
         Assertions.assertEquals("abc", stmt.getDb());
         Assertions.assertEquals(
@@ -121,12 +124,13 @@ public class ShowMaterializedViewTest {
                         "information_schema.materialized_views.query_rewrite_status AS query_rewrite_status, " +
                         "information_schema.materialized_views.creator AS creator, " +
                         "information_schema.materialized_views.last_refresh_process_time AS last_refresh_process_time, " +
-                        "information_schema.materialized_views.last_refresh_job_id AS last_refresh_job_id" +
+                        "information_schema.materialized_views.last_refresh_job_id AS last_refresh_job_id, " +
+                        "information_schema.materialized_views.last_refresh_time AS last_refresh_time" +
                         " FROM " +
                         "information_schema.materialized_views " +
                         "WHERE (information_schema.materialized_views.TABLE_SCHEMA = 'abc') AND " +
                         "(information_schema.materialized_views.TABLE_NAME = 'mv1')",
-                AstToStringBuilder.toString(stmt.toSelectStmt()));
+                AstToStringBuilder.toString(queryStatement));
         checkShowMaterializedViewsStmt(stmt);
     }
 

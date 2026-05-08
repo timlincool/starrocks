@@ -25,7 +25,6 @@ import com.starrocks.backup.BackupJobInfo.BackupTabletInfo;
 import com.starrocks.backup.RestoreJob.RestoreJobState;
 import com.starrocks.backup.mv.MvRestoreContext;
 import com.starrocks.catalog.Database;
-import com.starrocks.catalog.KeysType;
 import com.starrocks.catalog.MaterializedIndex;
 import com.starrocks.catalog.MaterializedIndex.IndexExtState;
 import com.starrocks.catalog.MaterializedView;
@@ -48,6 +47,7 @@ import com.starrocks.server.LocalMetastore;
 import com.starrocks.server.MetadataMgr;
 import com.starrocks.sql.analyzer.Analyzer;
 import com.starrocks.sql.ast.BrokerDesc;
+import com.starrocks.sql.ast.KeysType;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.parser.AstBuilder;
 import com.starrocks.sql.parser.SqlParser;
@@ -64,6 +64,7 @@ import com.starrocks.thrift.THdfsProperties;
 import com.starrocks.thrift.TStatus;
 import com.starrocks.thrift.TStatusCode;
 import com.starrocks.thrift.TTaskType;
+import com.starrocks.utframe.StarRocksTestBase;
 import mockit.Delegate;
 import mockit.Expectations;
 import mockit.Injectable;
@@ -96,7 +97,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
-public class RestoreJobMaterializedViewTest {
+public class RestoreJobMaterializedViewTest extends StarRocksTestBase {
 
     private Database db;
 
@@ -226,16 +227,6 @@ public class RestoreJobMaterializedViewTest {
             }
 
             {
-                editLog.logBackupJob((BackupJob) any);
-                minTimes = 0;
-                result = new Delegate() {
-                    public void logBackupJob(BackupJob job) {
-                        System.out.println("log backup job: " + job);
-                    }
-                };
-            }
-
-            {
                 repo.upload(anyString, anyString);
                 result = Status.OK;
                 minTimes = 0;
@@ -333,11 +324,11 @@ public class RestoreJobMaterializedViewTest {
             tblInfo.partitions.put(partInfo.name, partInfo);
 
             for (MaterializedIndex index : partition.getDefaultPhysicalPartition()
-                    .getMaterializedIndices(IndexExtState.VISIBLE)) {
+                    .getLatestMaterializedIndices(IndexExtState.VISIBLE)) {
                 BackupIndexInfo idxInfo = new BackupIndexInfo();
                 idxInfo.id = index.getId();
-                idxInfo.name = olapTable.getIndexNameById(index.getId());
-                idxInfo.schemaHash = olapTable.getSchemaHashByIndexId(index.getId());
+                idxInfo.name = olapTable.getIndexNameByMetaId(index.getMetaId());
+                idxInfo.schemaHash = olapTable.getSchemaHashByIndexMetaId(index.getMetaId());
                 partInfo.indexes.put(idxInfo.name, idxInfo);
 
                 for (Tablet tablet : index.getTablets()) {

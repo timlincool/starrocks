@@ -15,11 +15,22 @@
 package com.starrocks.authentication;
 
 import com.google.common.base.Strings;
+import com.starrocks.authorization.PrivilegeException;
 import com.starrocks.catalog.UserIdentity;
+import com.starrocks.qe.ConnectContext;
+import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.thrift.TAuthInfo;
 import com.starrocks.thrift.TUserIdentity;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 public class UserIdentityUtils {
-    
+    private static final Logger LOG = LogManager.getLogger(UserIdentityUtils.class);
+
     public static UserIdentity fromString(String userIdentStr) {
         if (Strings.isNullOrEmpty(userIdentStr)) {
             return null;
@@ -52,6 +63,7 @@ public class UserIdentityUtils {
         tUserIdent.setHost(userIdentity.getHost());
         tUserIdent.setUsername(userIdentity.getUser());
         tUserIdent.setIs_domain(userIdentity.isDomain());
+        tUserIdent.setIs_ephemeral(userIdentity.isEphemeral());
         return tUserIdent;
     }
 
@@ -59,4 +71,34 @@ public class UserIdentityUtils {
         return new UserIdentity(tUserIdent.getUsername(), tUserIdent.getHost(), tUserIdent.is_domain,
                 tUserIdent.is_ephemeral);
     }
+
+    public static void setAuthInfoFromThrift(ConnectContext context, TAuthInfo authInfo) {
+        if (authInfo.isSetCurrent_user_ident()) {
+            setAuthInfoFromThrift(context, authInfo.getCurrent_user_ident());
+        } else {
+            UserIdentity userIdentity = UserIdentity.createAnalyzedUserIdentWithIp(authInfo.user, authInfo.user_ip);
+            context.setCurrentUserIdentity(userIdentity);
+            context.setCurrentRoleIds(userIdentity);
+        }
+    }
+
+    public static void setAuthInfoFromThrift(ConnectContext context, TUserIdentity tUserIdent) {
+        UserIdentity userIdentity = UserIdentityUtils.fromThrift(tUserIdent);
+        context.setCurrentUserIdentity(userIdentity);
+        if (tUserIdent.isSetCurrent_role_ids()) {
+            List<Long> roleIdList = tUserIdent.current_role_ids.getRole_id_list();
+            Set<Long> requestedRoleIds = roleIdList != null ? new HashSet<>(roleIdList) : new HashSet<>();
+            try {
+                Set<Long> actualRoleIds =
+                        GlobalStateMgr.getCurrentState().getAuthorizationMgr().getRoleIdsByUser(userIdentity);
+                requestedRoleIds.retainAll(actualRoleIds);
+            } catch (PrivilegeException e) {
+                LOG.warn("Failed to validate role IDs for user {}: {}", userIdentity, e.getMessage());
+            }
+            context.setCurrentRoleIds(requestedRoleIds);
+        } else {
+            context.setCurrentRoleIds(userIdentity);
+        }
+    }
+
 }

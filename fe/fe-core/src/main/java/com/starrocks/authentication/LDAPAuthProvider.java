@@ -14,6 +14,7 @@
 
 package com.starrocks.authentication;
 
+import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.starrocks.catalog.UserIdentity;
 import com.starrocks.common.util.NetUtils;
@@ -46,6 +47,7 @@ public class LDAPAuthProvider implements AuthenticationProvider {
     private final String ldapBindBaseDN;
     private final String ldapSearchFilter;
     private final String ldapUserDN;
+    private final String ldapBindDNPattern;
 
     public LDAPAuthProvider(String ldapServerHost,
                             int ldapServerPort,
@@ -56,7 +58,8 @@ public class LDAPAuthProvider implements AuthenticationProvider {
                             String ldapBindRootPwd,
                             String ldapBindBaseDN,
                             String ldapSearchFilter,
-                            String ldapUserDN) {
+                            String ldapUserDN,
+                            String ldapBindDNPattern) {
         this.ldapServerHost = ldapServerHost;
         this.ldapServerPort = ldapServerPort;
         this.useSSL = useSSL;
@@ -67,10 +70,11 @@ public class LDAPAuthProvider implements AuthenticationProvider {
         this.ldapBindBaseDN = ldapBindBaseDN;
         this.ldapSearchFilter = ldapSearchFilter;
         this.ldapUserDN = ldapUserDN;
+        this.ldapBindDNPattern = ldapBindDNPattern;
     }
 
     @Override
-    public void authenticate(AuthenticationContext authContext, UserIdentity userIdentity, byte[] authResponse)
+    public void authenticate(AccessControlContext authContext, UserIdentity userIdentity, byte[] authResponse)
             throws AuthenticationException {
         //clear password terminate string
         byte[] clearPassword = authResponse;
@@ -79,11 +83,24 @@ public class LDAPAuthProvider implements AuthenticationProvider {
         }
 
         try {
+            String password = new String(clearPassword, StandardCharsets.UTF_8);
+            String distinguishedName;
             if (!Strings.isNullOrEmpty(ldapUserDN)) {
-                checkPassword(ldapUserDN, new String(clearPassword, StandardCharsets.UTF_8));
+                // Priority 1: per-user DN (from CREATE USER ... AS 'dn')
+                distinguishedName = ldapUserDN;
+                checkPassword(distinguishedName, password);
+            } else if (!Strings.isNullOrEmpty(ldapBindDNPattern)) {
+                // Priority 2: direct bind via DN pattern
+                distinguishedName = authenticateByPattern(userIdentity.getUser(), password);
             } else {
-                checkPasswordByRoot(userIdentity.getUser(), new String(clearPassword, StandardCharsets.UTF_8));
+                // Priority 3: search-and-bind
+                distinguishedName = findUserDNByRoot(userIdentity.getUser());
+                checkPassword(distinguishedName, password);
             }
+            Preconditions.checkNotNull(distinguishedName);
+
+            // set distinguished name to auth context
+            authContext.setDistinguishedName(distinguishedName);
         } catch (Exception e) {
             LOG.warn("check password failed for user: {}", userIdentity.getUser(), e);
             throw new AuthenticationException(e.getMessage());
@@ -109,8 +126,43 @@ public class LDAPAuthProvider implements AuthenticationProvider {
         env.put("java.naming.ldap.factory.socket", LdapSslSocketFactory.class.getName());
     }
 
+    // Try each DN pattern in order, return the first successfully bound DN.
+    // Patterns are separated by semicolon ';'.
+    protected String authenticateByPattern(String user, String password) throws Exception {
+        String safeUser = escapeDnValue(normalizeUsername(user));
+        String[] rawPatterns = ldapBindDNPattern.split(";");
+        // Pre-validate all patterns before attempting any bind
+        String[] patterns = new String[rawPatterns.length];
+        for (int i = 0; i < rawPatterns.length; i++) {
+            patterns[i] = trim(trim(rawPatterns[i].trim(), "\""), "'");
+            if (!patterns[i].contains("${USER}")) {
+                throw new AuthenticationException(
+                        "Invalid bind DN pattern: '" + patterns[i] + "' does not contain ${USER} placeholder. " +
+                        "Each pattern segment must include ${USER} to prevent shared-DN authentication bypass.");
+            }
+            if (!patterns[i].contains("=")) {
+                throw new AuthenticationException(
+                        "Invalid bind DN pattern: '" + patterns[i] + "' is not a valid DN format. " +
+                        "Pattern must produce a Distinguished Name (e.g., 'uid=${USER},ou=People,dc=example,dc=com'). " +
+                        "UPN-style patterns like '${USER}@domain' are not supported.");
+            }
+        }
+        Exception lastException = null;
+        for (String pattern : patterns) {
+            String dn = pattern.replace("${USER}", safeUser);
+            try {
+                checkPassword(dn, password);
+                return dn;
+            } catch (Exception e) {
+                lastException = e;
+                LOG.debug("direct bind failed for pattern '{}' with user '{}': {}", pattern, user, e.getMessage());
+            }
+        }
+        throw lastException;
+    }
+
     //bind to ldap server to check password
-    public void checkPassword(String dn, String password) throws Exception {
+    protected void checkPassword(String dn, String password) throws Exception {
         if (Strings.isNullOrEmpty(password)) {
             throw new AuthenticationException("empty password is not allowed for simple authentication");
         }
@@ -142,8 +194,8 @@ public class LDAPAuthProvider implements AuthenticationProvider {
 
     //1. bind ldap server by root dn
     //2. search user
-    //3. if match exactly one, check password
-    public void checkPasswordByRoot(String user, String password) throws Exception {
+    //3. if match exactly one, return the user's actual DN
+    protected String findUserDNByRoot(String user) throws Exception {
         if (Strings.isNullOrEmpty(ldapBindRootPwd)) {
             throw new AuthenticationException("empty password is not allowed for simple authentication");
         }
@@ -170,8 +222,11 @@ public class LDAPAuthProvider implements AuthenticationProvider {
             baseDN = trim(baseDN, "'");
             SearchControls sc = new SearchControls();
             sc.setSearchScope(SearchControls.SUBTREE_SCOPE);
+            // Normalize username for case-insensitive LDAP search
+            // LDAP treats usernames as case-insensitive by default, aligning with Microsoft Active Directory
+            String normalizedUser = normalizeUsername(user);
             // Escapes special characters in user input to prevent LDAP injection
-            String safeUser = escapeLdapValue(user);
+            String safeUser = escapeLdapValue(normalizedUser);
             String searchFilter = "(" + ldapSearchFilter + "=" + safeUser + ")";
             ctx = new InitialDirContext(env);
             NamingEnumeration<SearchResult> results = ctx.search(baseDN, searchFilter, sc);
@@ -197,7 +252,7 @@ public class LDAPAuthProvider implements AuthenticationProvider {
                 throw new AuthenticationException("ldap search matched user count " + matched);
             }
 
-            checkPassword(userDN, password);
+            return userDN;
         } finally {
             if (ctx != null) {
                 try {
@@ -221,6 +276,10 @@ public class LDAPAuthProvider implements AuthenticationProvider {
         return src;
     }
 
+    /**
+     * Escape special characters in a value used in an LDAP search filter (RFC 4515).
+     * Prevents LDAP filter injection by escaping: \ * ( ) \0
+     */
     public static String escapeLdapValue(String value) {
         if (value == null) {
             return null;
@@ -231,7 +290,59 @@ public class LDAPAuthProvider implements AuthenticationProvider {
         value = value.replace("(", "\\28");
         value = value.replace(")", "\\29");
         value = value.replace("|", "\\7c");
-        value = value.replace("\\u0000", "\\00");
+        value = value.replace("\u0000", "\\00");
         return value;
+    }
+
+    /**
+     * Escape special characters in a value used in an LDAP Distinguished Name (RFC 4514).
+     * Prevents DN injection by escaping: \ , + " < > ;
+     * and leading space/#, trailing space.
+     */
+    public static String escapeDnValue(String value) {
+        if (value == null) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder(value.length() + 10);
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '\\':
+                case ',':
+                case '+':
+                case '"':
+                case '<':
+                case '>':
+                case ';':
+                    sb.append('\\').append(c);
+                    break;
+                case '\0':
+                    sb.append("\\00");
+                    break;
+                default:
+                    if ((i == 0 && (c == ' ' || c == '#')) ||
+                            (i == value.length() - 1 && c == ' ')) {
+                        sb.append('\\').append(c);
+                    } else {
+                        sb.append(c);
+                    }
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Normalize username for case-insensitive matching with LDAP/Active Directory.
+     * LDAP treats usernames as case-insensitive by default, so we normalize to lowercase
+     * to ensure consistent identity mapping regardless of input casing.
+     *
+     * @param username the original username
+     * @return normalized username in lowercase
+     */
+    public static String normalizeUsername(String username) {
+        if (username == null) {
+            return null;
+        }
+        return username.toLowerCase();
     }
 }

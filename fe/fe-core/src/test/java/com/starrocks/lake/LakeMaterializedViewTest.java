@@ -22,13 +22,12 @@ import com.staros.proto.FilePathInfo;
 import com.staros.proto.FileStoreInfo;
 import com.staros.proto.FileStoreType;
 import com.staros.proto.S3FileStoreInfo;
-import com.starrocks.catalog.AggregateType;
+import com.starrocks.catalog.ColocateTableIndex;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.DataProperty;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.DistributionInfo;
 import com.starrocks.catalog.HashDistributionInfo;
-import com.starrocks.catalog.KeysType;
 import com.starrocks.catalog.ListPartitionInfo;
 import com.starrocks.catalog.MaterializedIndex;
 import com.starrocks.catalog.MaterializedIndex.IndexExtState;
@@ -45,7 +44,6 @@ import com.starrocks.catalog.SinglePartitionInfo;
 import com.starrocks.catalog.TableProperty;
 import com.starrocks.catalog.Tablet;
 import com.starrocks.catalog.TabletMeta;
-import com.starrocks.catalog.Type;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.jmockit.Deencapsulation;
@@ -57,12 +55,17 @@ import com.starrocks.qe.StmtExecutor;
 import com.starrocks.scheduler.Task;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.RunMode;
+import com.starrocks.sql.ast.AggregateType;
 import com.starrocks.sql.ast.AlterTableStmt;
+import com.starrocks.sql.ast.KeysType;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.parser.SqlParser;
 import com.starrocks.thrift.TStorageMedium;
 import com.starrocks.thrift.TStorageType;
+import com.starrocks.type.DateType;
+import com.starrocks.type.IntegerType;
 import com.starrocks.utframe.StarRocksAssert;
+import com.starrocks.utframe.StarRocksTestBase;
 import com.starrocks.utframe.UtFrameUtils;
 import mockit.Mock;
 import mockit.MockUp;
@@ -79,7 +82,7 @@ import java.util.Map;
 
 import static com.starrocks.sql.optimizer.MVTestUtils.waitForSchemaChangeAlterJobFinish;
 
-public class LakeMaterializedViewTest {
+public class LakeMaterializedViewTest extends StarRocksTestBase {
     private static final String DB = "db_for_lake_mv";
 
     private static ConnectContext connectContext;
@@ -134,10 +137,10 @@ public class LakeMaterializedViewTest {
 
         // Schema
         List<Column> columns = Lists.newArrayList();
-        Column k1 = new Column("k1", Type.INT, true, null, "", "");
+        Column k1 = new Column("k1", IntegerType.INT, true, null, "", "");
         columns.add(k1);
-        columns.add(new Column("k2", Type.BIGINT, true, null, "", ""));
-        columns.add(new Column("v", Type.BIGINT, false, AggregateType.SUM, "0", ""));
+        columns.add(new Column("k2", IntegerType.BIGINT, true, null, "", ""));
+        columns.add(new Column("v", IntegerType.BIGINT, false, AggregateType.SUM, "0", ""));
 
         // Tablet
         Tablet tablet1 = new LakeTablet(tablet1Id);
@@ -162,7 +165,7 @@ public class LakeMaterializedViewTest {
         // Lake mv
         LakeMaterializedView mv = new LakeMaterializedView(mvId, dbId, "mv1", columns, KeysType.AGG_KEYS,
                 partitionInfo, distributionInfo, mvRefreshScheme);
-        Deencapsulation.setField(mv, "baseIndexId", indexId);
+        Deencapsulation.setField(mv, "baseIndexMetaId", indexId);
         mv.addPartition(partition);
         mv.setIndexMeta(indexId, "mv1", columns, 0, 0, (short) 1, TStorageType.COLUMN, KeysType.AGG_KEYS);
 
@@ -236,7 +239,7 @@ public class LakeMaterializedViewTest {
 
         // show create materialized view
         String ddlStmt = lakeMv.getMaterializedViewDdlStmt(true);
-        System.out.println(ddlStmt);
+        logSysInfo(ddlStmt);
         Assertions.assertTrue(ddlStmt.contains("\"replication_num\" = \"1\""));
         Assertions.assertTrue(ddlStmt.contains("\"datacache.enable\" = \"true\""));
         Assertions.assertTrue(ddlStmt.contains("\"enable_async_write_back\" = \"false\""));
@@ -345,7 +348,7 @@ public class LakeMaterializedViewTest {
             starRocksAssert.dropTable("base_table4");
             Assertions.assertNull(GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getFullName(), "base_table4"));
         } catch (Exception e) {
-            System.out.println(e);
+            logSysInfo(e);
             Assertions.fail();
         }
     }
@@ -377,7 +380,7 @@ public class LakeMaterializedViewTest {
             starRocksAssert.dropTable("base_table5");
             Assertions.assertNull(GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getFullName(), "base_table5"));
         } catch (Exception e) {
-            System.out.println(e);
+            logSysInfo(e);
             Assertions.fail();
         }
     }
@@ -404,11 +407,11 @@ public class LakeMaterializedViewTest {
 
         // schema
         List<Column> columns = Lists.newArrayList();
-        Column k1 = new Column("k1", Type.DATE, true, null, "", "");
+        Column k1 = new Column("k1", DateType.DATE, true, null, "", "");
         columns.add(k1);
-        Column k2 = new Column("k2", Type.BIGINT, true, null, "", "");
+        Column k2 = new Column("k2", IntegerType.BIGINT, true, null, "", "");
         columns.add(k2);
-        columns.add(new Column("v", Type.BIGINT, false, AggregateType.SUM, "0", ""));
+        columns.add(new Column("v", IntegerType.BIGINT, false, AggregateType.SUM, "0", ""));
 
         DistributionInfo distributionInfo = new HashDistributionInfo(10, Lists.newArrayList(k2));
         RangePartitionInfo partitionInfo = new RangePartitionInfo(Lists.newArrayList(k1));
@@ -430,7 +433,7 @@ public class LakeMaterializedViewTest {
         LocalDate upper1 = LocalDate.now().minus(duration);
         LocalDate lower1 = upper1.minus(duration);
         Range<PartitionKey> range1 = Range.closedOpen(PartitionKey.ofDate(lower1), PartitionKey.ofDate(upper1));
-        partitionInfo.addPartition(partition1Id, false, range1, DataProperty.DEFAULT_DATA_PROPERTY, (short) 1, false,
+        partitionInfo.addPartition(partition1Id, false, range1, DataProperty.DEFAULT_DATA_PROPERTY, (short) 1,
                 new DataCacheInfo(true, false));
 
         // partition2
@@ -443,7 +446,7 @@ public class LakeMaterializedViewTest {
         LocalDate upper2 = LocalDate.now();
         LocalDate lower2 = upper2.minus(duration);
         Range<PartitionKey> range2 = Range.closedOpen(PartitionKey.ofDate(lower2), PartitionKey.ofDate(upper2));
-        partitionInfo.addPartition(partition2Id, false, range2, DataProperty.DEFAULT_DATA_PROPERTY, (short) 1, false,
+        partitionInfo.addPartition(partition2Id, false, range2, DataProperty.DEFAULT_DATA_PROPERTY, (short) 1,
                 new DataCacheInfo(true, false));
 
         // refresh scheme
@@ -453,7 +456,7 @@ public class LakeMaterializedViewTest {
         // Lake mv
         LakeMaterializedView mv = new LakeMaterializedView(mvId, dbId, "mv1", columns, KeysType.AGG_KEYS,
                 partitionInfo, distributionInfo, mvRefreshScheme);
-        Deencapsulation.setField(mv, "baseIndexId", indexId);
+        Deencapsulation.setField(mv, "baseIndexMetaId", indexId);
         mv.addPartition(partition1);
         mv.addPartition(partition2);
         mv.setIndexMeta(indexId, "mv1", columns, 0, 0, (short) 1, TStorageType.COLUMN, KeysType.AGG_KEYS);
@@ -473,7 +476,6 @@ public class LakeMaterializedViewTest {
 
         // range partition
         PartitionInfo rangePartitionInfo = new RangePartitionInfo(Lists.newArrayList());
-        rangePartitionInfo.setIsInMemory(partitionId, true);
         LakeMaterializedView mv1 =
                 new LakeMaterializedView(mvId, dbId, "mv1", null, null, rangePartitionInfo, null, null);
 
@@ -482,7 +484,6 @@ public class LakeMaterializedViewTest {
 
         // un-partitioned
         PartitionInfo singlePartitionInfo = new PartitionInfo(PartitionType.UNPARTITIONED);
-        singlePartitionInfo.setIsInMemory(partitionId, true);
         LakeMaterializedView mv2 =
                 new LakeMaterializedView(mvId, dbId, "mv1", null, null, singlePartitionInfo, null, null);
         recyclePartitionInfo = mv2.buildRecyclePartitionInfo(dbId, partition);
@@ -490,10 +491,36 @@ public class LakeMaterializedViewTest {
 
         // list partition
         PartitionInfo listPartitionInfo = new ListPartitionInfo(PartitionType.LIST, Lists.newArrayList());
-        listPartitionInfo.setIsInMemory(partitionId, true);
         LakeMaterializedView mv3 =
                 new LakeMaterializedView(mvId, dbId, "mv1", null, null, listPartitionInfo, null, null);
         recyclePartitionInfo = mv3.buildRecyclePartitionInfo(dbId, partition);
         Assertions.assertTrue(recyclePartitionInfo instanceof RecycleLakeListPartitionInfo);
+    }
+
+    @Test
+    public void testMaterializedViewColocation() throws Exception {
+        starRocksAssert.withMaterializedView("create materialized view mv6\n" +
+                "distributed by hash(k2) buckets 3\n" +
+                "PROPERTIES(\n" +
+                "   'colocate_with' = 'aaa'\n" +
+                ")\n" +
+                "refresh async\n" +
+                "as select k2, sum(k3) as total from base_table group by k2;");
+
+        Database db = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(DB);
+        MaterializedView mv =
+                (MaterializedView) GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getFullName(), "mv6");
+        Assertions.assertTrue(mv.isCloudNativeMaterializedView());
+        ColocateTableIndex index = GlobalStateMgr.getCurrentState().getColocateTableIndex();
+        Assertions.assertTrue(index.isMetaGroupColocateTable(mv.getId()));
+
+        String alterMvSql = "alter materialized view mv6 set ('colocate_with'='');";
+        StatementBase statement = SqlParser.parseSingleStatement(alterMvSql, connectContext.getSessionVariable().getSqlMode());
+        StmtExecutor stmtExecutor = new StmtExecutor(connectContext, statement);
+        stmtExecutor.execute();
+        Assertions.assertFalse(index.isMetaGroupColocateTable(mv.getId()));
+
+        starRocksAssert.dropMaterializedView("mv6");
+        Assertions.assertNull(GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getFullName(), "mv6"));
     }
 }

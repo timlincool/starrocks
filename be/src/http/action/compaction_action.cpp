@@ -38,6 +38,10 @@
 #include <sstream>
 #include <string>
 
+#include "base/format.h"
+#include "base/time/time.h"
+#include "base/utility/defer_op.h"
+#include "common/config_compaction_fwd.h"
 #include "common/logging.h"
 #include "common/status.h"
 #include "common/tracer.h"
@@ -55,13 +59,11 @@
 #include "storage/cumulative_compaction.h"
 #include "storage/olap_define.h"
 #include "storage/storage_engine.h"
+#include "storage/storage_metrics.h"
 #include "storage/tablet.h"
 #include "storage/tablet_manager.h"
 #include "storage/tablet_updates.h"
-#include "util/defer_op.h"
 #include "util/json_util.h"
-#include "util/starrocks_metrics.h"
-#include "util/time.h"
 
 namespace starrocks {
 
@@ -117,9 +119,9 @@ Status CompactionAction::do_compaction(uint64_t tablet_id, const string& compact
 
     auto* mem_tracker = GlobalEnv::GetInstance()->compaction_mem_tracker();
     if (tablet->updates() != nullptr) {
-        StarRocksMetrics::instance()->update_compaction_request_total.increment(1);
-        StarRocksMetrics::instance()->running_update_compaction_task_num.increment(1);
-        DeferOp op([&] { StarRocksMetrics::instance()->running_update_compaction_task_num.increment(-1); });
+        StorageMetrics::instance()->update_compaction_request_total.increment(1);
+        StorageMetrics::instance()->running_update_compaction_task_num.increment(1);
+        DeferOp op([&] { StorageMetrics::instance()->running_update_compaction_task_num.increment(-1); });
         Status res;
         if (rowset_ids_string.empty()) {
             res = tablet->updates()->compaction(mem_tracker);
@@ -145,7 +147,7 @@ Status CompactionAction::do_compaction(uint64_t tablet_id, const string& compact
             res = tablet->updates()->compaction(mem_tracker, rowset_ids);
         }
         if (!res.ok()) {
-            StarRocksMetrics::instance()->update_compaction_request_failed.increment(1);
+            StorageMetrics::instance()->update_compaction_request_failed.increment(1);
             LOG(WARNING) << "failed to perform update compaction. res=" << res.message()
                          << ", tablet=" << tablet->full_name();
             return res;
@@ -183,7 +185,7 @@ Status CompactionAction::do_compaction(uint64_t tablet_id, const string& compact
                     tablet->set_last_cumu_compaction_failure_time(UnixMillis());
                 }
                 if (!res.is_not_found()) {
-                    StarRocksMetrics::instance()->cumulative_compaction_request_failed.increment(1);
+                    StorageMetrics::instance()->cumulative_compaction_request_failed.increment(1);
                     LOG(WARNING) << "Fail to vectorized compact tablet=" << tablet->full_name()
                                  << ", err=" << res.to_string();
                 }
@@ -216,7 +218,7 @@ Status CompactionAction::do_compaction(uint64_t tablet_id, const string& compact
             if (!res.ok()) {
                 tablet->set_last_base_compaction_failure_time(UnixMillis());
                 if (!res.is_not_found()) {
-                    StarRocksMetrics::instance()->base_compaction_request_failed.increment(1);
+                    StorageMetrics::instance()->base_compaction_request_failed.increment(1);
                     LOG(WARNING) << "failed to init vectorized base compaction. res=" << res.to_string()
                                  << ", tablet=" << tablet->full_name();
                 }
@@ -273,7 +275,8 @@ Status CompactionAction::_handle_show_repairs(HttpRequest* req, std::string* jso
         need_to_repair.PushBack(item, root.GetAllocator());
     }
     root.AddMember("need_to_repair", need_to_repair, root.GetAllocator());
-    root.AddMember("need_to_repair_num", tablets_with_small_segment_files.size(), root.GetAllocator());
+    root.AddMember("need_to_repair_num", static_cast<uint64_t>(tablets_with_small_segment_files.size()),
+                   root.GetAllocator());
 
     rapidjson::Document executed;
     executed.SetArray();
@@ -295,7 +298,7 @@ Status CompactionAction::_handle_show_repairs(HttpRequest* req, std::string* jso
         executed.PushBack(item, root.GetAllocator());
     }
     root.AddMember("executed_task", executed, root.GetAllocator());
-    root.AddMember("executed_task_num", tasks.size(), root.GetAllocator());
+    root.AddMember("executed_task_num", static_cast<uint64_t>(tasks.size()), root.GetAllocator());
 
     rapidjson::StringBuffer strbuf;
     rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(strbuf);
@@ -324,6 +327,7 @@ Status CompactionAction::_handle_submit_repairs(HttpRequest* req, std::string* j
         // do all tablets
         for (auto& itr : tablets_with_small_segment_files) {
             vector<uint32_t> rowsetids;
+            rowsetids.reserve(itr.second.size());
             for (const auto& rowset_segments_pair : itr.second) {
                 rowsetids.emplace_back(rowset_segments_pair.first);
             }

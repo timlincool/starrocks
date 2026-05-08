@@ -16,20 +16,20 @@
 
 #include <gen_cpp/PlanNodes_types.h>
 #include <runtime/descriptors.h>
+#include <runtime/mem_pool.h>
 #include <runtime/runtime_state.h>
 
 #include <coroutine>
 #include <cstdint>
-#include <set>
+#include <optional>
 
+#include "base/simd/simd.h"
 #include "column/chunk.h"
 #include "column/column_hash.h"
 #include "column/column_helper.h"
 #include "column/vectorized_fwd.h"
-#include "join_hash_map_helper.h"
-#include "join_hash_table_descriptor.h"
-#include "simd/simd.h"
-#include "util/phmap/phmap.h"
+#include "exec/join/join_hash_map_helper.h"
+#include "exec/join/join_hash_table_descriptor.h"
 
 namespace starrocks {
 
@@ -44,12 +44,12 @@ public:
     using ColumnType = typename RunTimeTypeTraits<LT>::ColumnType;
 
     static void prepare(RuntimeState* state, JoinHashTableItems* table_items) {}
-    static void build_key(RuntimeState* state, JoinHashTableItems* table_items) {}
+    static void build_key(RuntimeState* state, JoinHashTableItems* table_items);
     static size_t get_key_column_bytes(const JoinHashTableItems& table_items) {
         return table_items.key_columns[0]->byte_size();
     }
-    static const Buffer<CppType>& get_key_data(const JoinHashTableItems& table_items);
-    static const Buffer<uint8_t>* get_is_nulls(const JoinHashTableItems& table_items);
+    static const ImmBuffer<CppType> get_key_data(const JoinHashTableItems& table_items);
+    static const std::optional<ImmBuffer<uint8_t>> get_is_nulls(const JoinHashTableItems& table_items);
 };
 
 template <LogicalType LT>
@@ -60,7 +60,7 @@ public:
 
     static void prepare(RuntimeState* state, HashTableProbeState* probe_state) {}
     static void build_key(const JoinHashTableItems& table_items, HashTableProbeState* probe_state);
-    static const Buffer<CppType>& get_key_data(const HashTableProbeState& probe_state);
+    static const ImmBuffer<CppType> get_key_data(const HashTableProbeState& probe_state);
 };
 
 // ------------------------------------------------------------------------------------
@@ -79,11 +79,14 @@ public:
     static size_t get_key_column_bytes(const JoinHashTableItems& table_items) {
         return table_items.build_key_column->byte_size();
     }
-    static const Buffer<CppType>& get_key_data(const JoinHashTableItems& table_items) {
-        return ColumnHelper::as_raw_column<const ColumnType>(table_items.build_key_column)->get_data();
+    static const ImmBuffer<CppType> get_key_data(const JoinHashTableItems& table_items) {
+        return ColumnHelper::as_raw_column<const ColumnType>(table_items.build_key_column)->immutable_data();
     }
-    static const Buffer<uint8_t>* get_is_nulls(const JoinHashTableItems& table_items) {
-        return table_items.build_key_nulls.empty() ? nullptr : &table_items.build_key_nulls;
+    static const std::optional<ImmBuffer<uint8_t>> get_is_nulls(const JoinHashTableItems& table_items) {
+        if (table_items.build_key_nulls.empty()) {
+            return std::nullopt;
+        }
+        return table_items.build_key_nulls;
     }
 };
 
@@ -100,7 +103,7 @@ public:
 
     static void build_key(const JoinHashTableItems& table_items, HashTableProbeState* probe_state);
 
-    static const Buffer<CppType>& get_key_data(const HashTableProbeState& probe_state) {
+    static const ImmBuffer<CppType> get_key_data(const HashTableProbeState& probe_state) {
         return ColumnHelper::as_raw_column<ColumnType>(probe_state.probe_key_column)->get_data();
     }
 };
@@ -117,9 +120,14 @@ public:
     static size_t get_key_column_bytes(const JoinHashTableItems& table_items) {
         return table_items.build_pool->total_allocated_bytes();
     }
-    static const Buffer<Slice>& get_key_data(const JoinHashTableItems& table_items) { return table_items.build_slice; }
-    static const Buffer<uint8_t>* get_is_nulls(const JoinHashTableItems& table_items) {
-        return table_items.build_key_nulls.empty() ? nullptr : &table_items.build_key_nulls;
+    static const ImmBuffer<Slice> get_key_data(const JoinHashTableItems& table_items) {
+        return table_items.build_slice;
+    }
+    static const std::optional<ImmBuffer<uint8_t>> get_is_nulls(const JoinHashTableItems& table_items) {
+        if (table_items.build_key_nulls.empty()) {
+            return std::nullopt;
+        }
+        return table_items.build_key_nulls;
     }
 };
 
@@ -133,7 +141,9 @@ public:
 
     static void build_key(const JoinHashTableItems& table_items, HashTableProbeState* probe_state);
 
-    static const Buffer<Slice>& get_key_data(const HashTableProbeState& probe_state) { return probe_state.probe_slice; }
+    static const ImmBuffer<Slice> get_key_data(const HashTableProbeState& probe_state) {
+        return probe_state.probe_slice;
+    }
 
 private:
     static void _probe_column(const JoinHashTableItems& table_items, HashTableProbeState* probe_state,

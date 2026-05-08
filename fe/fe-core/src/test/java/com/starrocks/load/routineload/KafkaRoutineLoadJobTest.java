@@ -40,6 +40,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.OlapTable;
+import com.starrocks.common.ExceptionChecker;
 import com.starrocks.common.LoadException;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.Pair;
@@ -47,16 +48,19 @@ import com.starrocks.common.StarRocksException;
 import com.starrocks.common.jmockit.Deencapsulation;
 import com.starrocks.common.util.KafkaUtil;
 import com.starrocks.load.RoutineLoadDesc;
+import com.starrocks.metric.RoutineLoadLagTimeMetricMgr;
 import com.starrocks.persist.OriginStatementInfo;
 import com.starrocks.persist.gson.GsonUtils;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.ast.ColumnSeparator;
 import com.starrocks.sql.ast.CreateRoutineLoadStmt;
+import com.starrocks.sql.ast.KeysType;
 import com.starrocks.sql.ast.LabelName;
 import com.starrocks.sql.ast.ParseNode;
-import com.starrocks.sql.ast.PartitionNames;
+import com.starrocks.sql.ast.PartitionRef;
 import com.starrocks.sql.parser.AstBuilder;
+import com.starrocks.sql.parser.NodePosition;
 import com.starrocks.sql.parser.SqlParser;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.thrift.TResourceInfo;
@@ -90,7 +94,7 @@ public class KafkaRoutineLoadJobTest {
     private String serverAddress = "http://127.0.0.1:8080";
     private String kafkaPartitionString = "1,2,3";
 
-    private PartitionNames partitionNames;
+    private PartitionRef partitionNames;
 
     private ColumnSeparator columnSeparator = new ColumnSeparator(",");
 
@@ -103,7 +107,7 @@ public class KafkaRoutineLoadJobTest {
     public void init() {
         List<String> partitionNameList = Lists.newArrayList();
         partitionNameList.add("p1");
-        partitionNames = new PartitionNames(false, partitionNameList);
+        partitionNames = new PartitionRef(partitionNameList, false, NodePosition.ZERO);
     }
 
     @Test
@@ -517,6 +521,69 @@ public class KafkaRoutineLoadJobTest {
     }
 
     @Test
+    public void testSerializationJsonWithEnvelope(@Mocked GlobalStateMgr globalStateMgr,
+                                                  @Injectable Database database,
+                                                  @Injectable OlapTable table) throws StarRocksException {
+        CreateRoutineLoadStmt createRoutineLoadStmt = initCreateRoutineLoadStmt();
+        Map<String, String> jobProperties = createRoutineLoadStmt.getJobProperties();
+        jobProperties.put("format", "json");
+        jobProperties.put("json_root", "");
+        jobProperties.put("strip_outer_array", "false");
+        jobProperties.put("envelope", CreateRoutineLoadStmt.ENVELOPE_DEBEZIUM);
+        jobProperties.put("timezone", "Asia/Shanghai");
+        createRoutineLoadStmt.checkJobProperties();
+
+        RoutineLoadDesc routineLoadDesc = new RoutineLoadDesc(columnSeparator, null, null, null, partitionNames);
+        Deencapsulation.setField(createRoutineLoadStmt, "routineLoadDesc", routineLoadDesc);
+        List<Pair<Integer, Long>> partitionIdToOffset = Lists.newArrayList();
+        for (String s : kafkaPartitionString.split(",")) {
+            partitionIdToOffset.add(new Pair<>(Integer.valueOf(s), 0L));
+        }
+        Deencapsulation.setField(createRoutineLoadStmt, "kafkaPartitionOffsets", partitionIdToOffset);
+        Deencapsulation.setField(createRoutineLoadStmt, "kafkaBrokerList", serverAddress);
+        Deencapsulation.setField(createRoutineLoadStmt, "kafkaTopic", topicName);
+        long dbId = 1L;
+        long tableId = 2L;
+
+        new Expectations() {
+            {
+                GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(database.getFullName(), tableNameString);
+                minTimes = 0;
+                result = table;
+                database.getId();
+                minTimes = 0;
+                result = dbId;
+                table.getId();
+                minTimes = 0;
+                result = tableId;
+                table.isOlapOrCloudNativeTable();
+                minTimes = 0;
+                result = true;
+                table.getKeysType();
+                minTimes = 0;
+                result = KeysType.PRIMARY_KEYS;
+                globalStateMgr.getSqlParser();
+                minTimes = 0;
+                result = new SqlParser(AstBuilder.getInstance());
+            }
+        };
+
+        new MockUp<KafkaUtil>() {
+            @Mock
+            public List<Integer> getAllKafkaPartitions(String brokerList, String topic,
+                                                       ImmutableMap<String, String> properties) throws
+                    StarRocksException {
+                return Lists.newArrayList(1, 2, 3);
+            }
+        };
+
+        KafkaRoutineLoadJob job = KafkaRoutineLoadJob.fromCreateStmt(createRoutineLoadStmt);
+        Assertions.assertEquals(CreateRoutineLoadStmt.ENVELOPE_DEBEZIUM, job.getEnvelope());
+        Assertions.assertTrue(job.jobPropertiesToSql()
+                .contains("\"" + CreateRoutineLoadStmt.ENVELOPE + "\"=\"" + CreateRoutineLoadStmt.ENVELOPE_DEBEZIUM + "\""));
+    }
+
+    @Test
     public void testGetStatistic() {
         RoutineLoadJob job = new KafkaRoutineLoadJob(1L, "routine_load", 1L, 1L, "127.0.0.1:9020", "topic1");
         Deencapsulation.setField(job, "receivedBytes", 10);
@@ -627,6 +694,162 @@ public class KafkaRoutineLoadJobTest {
         sourceLagString = job.getSourceLagString(progressJsonStr);
         Assertions.assertTrue(sourceLagString.contains("\"0\":\"0\""));
 
+    }
+
+    @Test
+    public void testUpdateLagTimeMetricsFromProgress() {
+        KafkaRoutineLoadJob job = new KafkaRoutineLoadJob(1L, "test_job", 1L, 1L, "127.0.0.1:9020", "topic1");
+        
+        // Create timestamp progress with future timestamp (clock drift scenario)
+        Map<Integer, Long> partitionTimestamps = Maps.newHashMap();
+        long currentTime = System.currentTimeMillis();
+        partitionTimestamps.put(0, currentTime + 60000); // 1 minute in the future (clock drift)
+        partitionTimestamps.put(1, currentTime - 5000);  // Normal timestamp
+        
+        KafkaProgress timestampProgress = new KafkaProgress(partitionTimestamps);
+        Deencapsulation.setField(job, "timestampProgress", timestampProgress);
+        
+        new MockUp<RoutineLoadLagTimeMetricMgr>() {
+            @Mock
+            public void updateRoutineLoadLagTimeMetric(long dbId, String jobName, Map<Integer, Long> partitionLagTimes) {
+                // Verify clock drift handling: partition 0 should have lag 0, partition 1 should have positive lag
+                Assertions.assertTrue(partitionLagTimes.containsKey(0));
+                Assertions.assertTrue(partitionLagTimes.containsKey(1));
+                Assertions.assertEquals(Long.valueOf(0L), partitionLagTimes.get(0)); // Clock drift case
+                Assertions.assertTrue(partitionLagTimes.get(1) > 0); // Normal case
+            }
+        };
+        
+        // Execute: Call the private method
+        Deencapsulation.invoke(job, "updateLagTimeMetricsFromProgress");
+    }
+
+    @Test
+    public void testUpdateLagTimeMetricsFromProgressWithException() {
+        KafkaRoutineLoadJob job = new KafkaRoutineLoadJob(1L, "test_job", 1L, 1L, "127.0.0.1:9020", "topic1");
+        // Set null timestamp progress to trigger exception
+        Deencapsulation.setField(job, "timestampProgress", null);
+        Deencapsulation.invoke(job, "updateLagTimeMetricsFromProgress");
+    }
+
+    @Test
+    public void testGetRoutineLoadLagTimeSuccess() {
+        KafkaRoutineLoadJob job = new KafkaRoutineLoadJob(1L, "test_job", 1L, 1L, "127.0.0.1:9020", "topic1");
+        
+        // Mock successful retrieval from RoutineLoadLagTimeMetricMgr
+        Map<Integer, Long> expectedLagTimes = Maps.newHashMap();
+        expectedLagTimes.put(0, 10L);
+        expectedLagTimes.put(1, 15L);
+        
+        new MockUp<RoutineLoadLagTimeMetricMgr>() {
+            @Mock
+            public Map<Integer, Long> getPartitionLagTimes(long dbId, String jobName) {
+                return expectedLagTimes;
+            }
+        };
+        
+        // Execute: Call the private method
+        Map<Integer, Long> result = Deencapsulation.invoke(job, "getRoutineLoadLagTime");
+        
+        // Verify: Should return the expected lag times
+        Assertions.assertEquals(expectedLagTimes, result);
+        Assertions.assertEquals(2, result.size());
+        Assertions.assertEquals(Long.valueOf(10L), result.get(0));
+        Assertions.assertEquals(Long.valueOf(15L), result.get(1));
+    }
+
+    @Test
+    public void testGetRoutineLoadLagTimeEmpty() {
+        KafkaRoutineLoadJob job = new KafkaRoutineLoadJob(1L, "test_job", 1L, 1L, "127.0.0.1:9020", "topic1");
+        
+        // Mock empty retrieval from RoutineLoadLagTimeMetricMgr
+        new MockUp<RoutineLoadLagTimeMetricMgr>() {
+            @Mock
+            public Map<Integer, Long> getPartitionLagTimes(long dbId, String jobName) {
+                return Maps.newHashMap(); // Empty map
+            }
+        };
+        
+        // Execute: Call the private method
+        Map<Integer, Long> result = Deencapsulation.invoke(job, "getRoutineLoadLagTime");
+        
+        // Verify: Should return empty map
+        Assertions.assertTrue(result.isEmpty());
+    }
+
+    @Test
+    public void testGetRoutineLoadLagTimeWithNull() {
+        KafkaRoutineLoadJob job = new KafkaRoutineLoadJob(1L, "test_job", 1L, 1L, "127.0.0.1:9020", "topic1");
+        
+        // Mock null retrieval from RoutineLoadLagTimeMetricMgr
+        new MockUp<RoutineLoadLagTimeMetricMgr>() {
+            @Mock
+            public Map<Integer, Long> getPartitionLagTimes(long dbId, String jobName) {
+                return null; // Null return
+            }
+        };
+        
+        // Execute: Call the private method
+        Map<Integer, Long> result = Deencapsulation.invoke(job, "getRoutineLoadLagTime");
+        
+        // Verify: Should return empty map as fallback
+        Assertions.assertTrue(result.isEmpty());
+    }
+
+    @Test
+    public void testFromCreateStmtEnvelopeDebeziumRequiresPrimaryKeyTable(
+            @Mocked GlobalStateMgr globalStateMgr,
+            @Injectable Database database,
+            @Injectable OlapTable table) {
+        CreateRoutineLoadStmt createRoutineLoadStmt = initCreateRoutineLoadStmt();
+        RoutineLoadDesc routineLoadDesc = new RoutineLoadDesc(columnSeparator, null, null, null, partitionNames);
+        Deencapsulation.setField(createRoutineLoadStmt, "routineLoadDesc", routineLoadDesc);
+        Deencapsulation.setField(createRoutineLoadStmt, "kafkaBrokerList", serverAddress);
+        Deencapsulation.setField(createRoutineLoadStmt, "kafkaTopic", topicName);
+        Deencapsulation.setField(createRoutineLoadStmt, "format", "json");
+        Deencapsulation.setField(createRoutineLoadStmt, "envelope", "debezium");
+
+        new Expectations() {
+            {
+                GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(database.getFullName(), tableNameString);
+                minTimes = 0;
+                result = table;
+                database.getId();
+                minTimes = 0;
+                result = 1L;
+                table.getId();
+                minTimes = 0;
+                result = 2L;
+                table.isOlapOrCloudNativeTable();
+                minTimes = 0;
+                result = true;
+                table.getKeysType();
+                result = KeysType.DUP_KEYS;
+            }
+        };
+
+        ExceptionChecker.expectThrowsWithMsg(StarRocksException.class,
+                "envelope=debezium is only supported on PRIMARY KEY tables",
+                () -> KafkaRoutineLoadJob.fromCreateStmt(createRoutineLoadStmt));
+    }
+
+    @Test
+    public void testGetRoutineLoadLagTimeWithException() {
+        KafkaRoutineLoadJob job = new KafkaRoutineLoadJob(1L, "test_job", 1L, 1L, "127.0.0.1:9020", "topic1");
+        
+        // Mock exception from RoutineLoadLagTimeMetricMgr
+        new MockUp<RoutineLoadLagTimeMetricMgr>() {
+            @Mock
+            public Map<Integer, Long> getPartitionLagTimes(long dbId, String jobName) {
+                throw new RuntimeException("Test exception");
+            }
+        };
+        
+        // Execute: Call the private method
+        Map<Integer, Long> result = Deencapsulation.invoke(job, "getRoutineLoadLagTime");
+        
+        // Verify: Should return empty map as fallback
+        Assertions.assertTrue(result.isEmpty());
     }
 
 

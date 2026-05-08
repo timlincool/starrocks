@@ -30,26 +30,27 @@
 #include <limits>
 #include <random>
 
+#include "base/network/cidr.h"
+#include "base/network/network_util.h"
+#include "base/time/monotime.h"
+#include "base/time/time.h"
+#include "base/uuid/uuid_generator.h"
 #include "column/binary_column.h"
 #include "column/column_builder.h"
 #include "column/column_helper.h"
 #include "column/column_viewer.h"
 #include "column/vectorized_fwd.h"
-#include "common/config.h"
+#include "common/config_network_fwd.h"
+#include "common/system/backend_options.h"
 #include "common/version.h"
 #include "exec/pipeline/fragment_context.h"
 #include "exprs/function_context.h"
 #include "gutil/casts.h"
 #include "runtime/runtime_state.h"
-#include "service/backend_options.h"
+#include "runtime/thrift_rpc_helper.h"
 #include "storage/key_coder.h"
 #include "storage/primary_key_encoder.h"
 #include "types/logical_type.h"
-#include "util/cidr.h"
-#include "util/monotime.h"
-#include "util/network_util.h"
-#include "util/thrift_rpc_helper.h"
-#include "util/time.h"
 
 namespace starrocks {
 
@@ -108,7 +109,7 @@ StatusOr<ColumnPtr> UtilityFunctions::uuid(FunctionContext* ctx, const Columns& 
     int32_t num_rows = ColumnHelper::get_const_value<TYPE_INT>(columns.back());
 
     ASSIGN_OR_RETURN(auto col, UtilityFunctions::uuid_numeric(ctx, columns));
-    auto& uuid_data = down_cast<Int128Column*>(col.get())->get_data();
+    const auto uuid_data = down_cast<const Int128Column*>(col.get())->immutable_data();
 
     auto res = BinaryColumn::create();
     auto& bytes = res->get_bytes();
@@ -231,6 +232,52 @@ StatusOr<ColumnPtr> UtilityFunctions::uuid_numeric(FunctionContext*, const Colum
     return result;
 }
 
+// UUID v7 generates time-ordered UUIDs according to RFC 9562
+// Returns a VARCHAR column with standard UUID format (8-4-4-4-12)
+StatusOr<ColumnPtr> UtilityFunctions::uuid_v7(FunctionContext* ctx, const Columns& columns) {
+    int32_t num_rows = ColumnHelper::get_const_value<TYPE_INT>(columns.back());
+
+    auto res = BinaryColumn::create();
+    auto& bytes = res->get_bytes();
+    auto& offsets = res->get_offset();
+
+    offsets.resize(num_rows + 1);
+    bytes.resize(36 * num_rows);
+
+    char* ptr = reinterpret_cast<char*>(bytes.data());
+
+    for (int i = 0; i < num_rows; ++i) {
+        offsets[i + 1] = offsets[i] + 36;
+        auto uuid = ThreadLocalUUIDGenerator::next_uuid_v7();
+        std::string uuid_str = boost::uuids::to_string(uuid);
+        memcpy(ptr, uuid_str.c_str(), 36);
+        ptr += 36;
+    }
+
+    return res;
+}
+
+// UUID v7 numeric version - converts the UUID v7 to a 128-bit integer
+// Note: The byte order of the numeric representation depends on the system's endianness.
+// This is consistent with other numeric UUID conversions in the codebase and provides
+// a stable representation for comparison and storage purposes.
+StatusOr<ColumnPtr> UtilityFunctions::uuid_v7_numeric(FunctionContext*, const Columns& columns) {
+    int32_t num_rows = ColumnHelper::get_const_value<TYPE_INT>(columns.back());
+    auto result = Int128Column::create(num_rows);
+    auto& data = result->get_data();
+
+    for (int i = 0; i < num_rows; ++i) {
+        auto uuid = ThreadLocalUUIDGenerator::next_uuid_v7();
+        // Convert UUID bytes to int128_t
+        // Direct memcpy is used for consistency with existing uuid_numeric implementation
+        int128_t value;
+        memcpy(&value, uuid.data, 16);
+        data[i] = value;
+    }
+
+    return result;
+}
+
 StatusOr<ColumnPtr> UtilityFunctions::assert_true(FunctionContext* context, const Columns& columns) {
     auto column = columns[0];
     std::string msg = "assert_true failed due to false value";
@@ -254,7 +301,7 @@ StatusOr<ColumnPtr> UtilityFunctions::assert_true(FunctionContext* context, cons
             column = FunctionHelper::get_data_column_of_nullable(column);
         }
         auto bool_column = ColumnHelper::cast_to<TYPE_BOOLEAN>(column);
-        const auto& data = bool_column->get_data();
+        const auto data = bool_column->immutable_data();
         for (size_t i = 0; i < size; ++i) {
             if (!data[i]) {
                 throw std::runtime_error(msg);
@@ -288,6 +335,7 @@ StatusOr<ColumnPtr> UtilityFunctions::get_query_profile(FunctionContext* context
     TGetProfileRequest req;
 
     std::vector<std::string> query_ids;
+    query_ids.reserve(columns[0]->size());
     for (size_t i = 0; i < columns[0]->size(); ++i) {
         query_ids.emplace_back(viewer.value(i));
     }
@@ -396,13 +444,13 @@ inline void encode_float64(double v, std::string* dest) {
 struct EncoderVisitor : public ColumnVisitorAdapter<EncoderVisitor> {
     bool is_last_field = false;
     std::vector<std::string>* buffs;
-    const Buffer<uint8_t>* null_mask = nullptr; // Track null rows to skip processing
+    const ImmBuffer<uint8_t>* null_mask = nullptr; // Track null rows to skip processing
 
     explicit EncoderVisitor() : ColumnVisitorAdapter(this) {}
 
     // Nullable wrapper: handle null values and data together
     Status do_visit(const NullableColumn& column) {
-        auto& nulls = column.immutable_null_column_data();
+        const auto nulls = column.immutable_null_column_data();
 
         for (size_t i = 0; i < column.size(); i++) {
             if (nulls[i]) {
@@ -413,7 +461,7 @@ struct EncoderVisitor : public ColumnVisitorAdapter<EncoderVisitor> {
         }
 
         // Set the null mask so that subsequent visitor methods can skip null rows
-        const Buffer<uint8_t>* original_null_mask = null_mask;
+        const ImmBuffer<uint8_t>* original_null_mask = null_mask;
         null_mask = &nulls;
 
         // Process the underlying data column
@@ -450,7 +498,7 @@ struct EncoderVisitor : public ColumnVisitorAdapter<EncoderVisitor> {
     // Fixed-length numerics
     template <typename T>
     Status do_visit(const FixedLengthColumn<T>& column) {
-        const auto& data = column.get_data();
+        const auto data = column.immutable_data();
         for (size_t i = 0; i < column.size(); i++) {
             // Skip processing for null rows
             if (null_mask && (*null_mask)[i]) {
@@ -548,9 +596,13 @@ StatusOr<ColumnPtr> UtilityFunctions::encode_sort_key(FunctionContext* context, 
     }
 
     for (size_t i = 0; i < num_rows; i++) {
-        result.append(std::move(buffs[i]));
+        result.append(buffs[i]);
     }
     return result.build(ColumnHelper::is_all_const(columns));
+}
+
+StatusOr<ColumnPtr> UtilityFunctions::materialize(FunctionContext* context, const Columns& columns) {
+    return Column::mutate(columns[0]);
 }
 
 } // namespace starrocks

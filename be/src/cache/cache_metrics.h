@@ -17,10 +17,6 @@
 #include "common/status.h"
 #include "gen_cpp/DataCache_types.h"
 
-#ifdef WITH_STARCACHE
-#include "starcache/star_cache.h"
-#endif
-
 namespace starrocks {
 
 enum class DataCacheStatus { NORMAL, UPDATING, ABNORMAL, LOADING };
@@ -54,20 +50,5 @@ struct DataCacheStatusUtils {
         }
     }
 };
-
-struct DataCacheMetrics {
-    DataCacheStatus status;
-
-    size_t mem_quota_bytes;
-    size_t mem_used_bytes;
-    size_t disk_quota_bytes;
-    size_t disk_used_bytes;
-    size_t meta_used_bytes = 0;
-};
-
-#ifdef WITH_STARCACHE
-using StarCacheMetrics = starcache::CacheMetrics;
-using StarCacheStatus = starcache::CacheStatus;
-#endif
 
 } // namespace starrocks

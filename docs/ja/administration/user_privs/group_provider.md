@@ -5,13 +5,18 @@ sidebar_position: 30
 
 # ユーザーグループの認証
 
+import UnixFileIntro from '../../_assets/user_priv/unix_file_intro.mdx'
+import UnixFileSyntax from '../../_assets/user_priv/unix_file_syntax.mdx'
+import UnixFileParam from '../../_assets/user_priv/unix_file_param.mdx'
+import GroupProviderRangerLink from '../../_assets/user_priv/group_provider_ranger_link.mdx'
+
 StarRocks で Group Provider を有効にして、外部認証システムからユーザーグループを認証し、認可します。
 
 v3.5.0 以降、StarRocks は Group Provider をサポートしており、外部認証システムからグループ情報を収集してユーザーグループ管理を行います。
 
 ## 概要
 
-LDAP、OpenID Connect、OAuth 2.0、Apache Ranger などの外部ユーザー認証および認可システムとの統合を深めるために、StarRocks はユーザーグループ情報を収集し、集団的なユーザー管理をより良い体験にします。
+LDAP、Apache Ranger などの外部ユーザー認証および認可システムとの統合を深めるために、StarRocks はユーザーグループ情報を収集し、集団的なユーザー管理をより良い体験にします。
 
 Group Provider を使用すると、外部ユーザーシステムから異なる目的でグループ情報を取得できます。グループ情報は独立しており、認証、認可、またはその他のプロセスに柔軟に統合でき、特定のワークフローに厳密に結びつけられることはありません。
 
@@ -25,15 +30,13 @@ Group Provider は、ユーザーとグループの間のマッピングです�
 
 ## Group Provider を作成する
 
-StarRocks は 3 種類の Group Provider をサポートしています:
-- **LDAP group provider**: LDAP サービス内のユーザーとグループを検索して一致させます
-- **Unix group provider**: オペレーティングシステム内のユーザーとグループを検索して一致させます
-- **File group provider**: ファイルで定義されたユーザーとグループを検索して一致させます
+<UnixFileIntro />
 
 ### 構文
 
+- LDAP group provider:
+
 ```SQL
--- LDAP group provider
 CREATE GROUP PROVIDER <group_provider_name> 
 PROPERTIES (
     "type" = "ldap",
@@ -65,29 +68,13 @@ ldap_search_user_arg ::=
 
 ldap_cache_arg ::= 
     "ldap_cache_refresh_interval" = ""
-
--- Unix group provider
-CREATE GROUP PROVIDER <group_provider_name> 
-PROPERTIES (
-    "type" = "unix"
-)
-
--- File group provider
-CREATE GROUP PROVIDER <group_provider_name> 
-PROPERTIES (
-    "type" = "file",
-    "group_file_url" = ""
-)
 ```
+
+<UnixFileSyntax />
 
 ### パラメータ
 
-#### `type`
-
-作成する Group Provider のタイプ。 有効な値:
-- `ldap`: LDAP group provider を作成します。この値が設定されている場合、`ldap_info`、`ldap_search_group_arg`、`ldap_search_user_arg`、およびオプションで `ldap_cache_arg` を指定する必要があります。
-- `unix`: Unix group provider を作成します。
-- `file`: File group provider を作成します。この値が設定されている場合、`group_file_url` を指定する必要があります。
+<UnixFileParam />
 
 #### `ldap_info` パラメーターグループ
 
@@ -162,6 +149,28 @@ StarRocks がグループ内のユーザーを識別する方法を制御する�
 
 メンバー属性値からユーザー識別子を抽出する方法を指定します。明示的に属性を定義することも（例: `cn` または `uid`）、正規表現を使用することもできます。
 
+:::note
+
+**DN マッチングメカニズム**
+
+- **`ldap_user_search_attr` が設定されている場合**、システムはグループメンバーの DN から指定された値を抽出し、それをユーザー名として使用します。また、グループ検索時にはログインユーザー名をキーとして使用します。
+- **`ldap_user_search_attr` が設定されていない場合**、システムは完全な DN を直接ユーザー識別子として使用し、グループ検索時には認証時に記録された DN をキーとして使用します。
+
+この設計により、LDAP Group Provider は様々な LDAP 環境、特に Microsoft ADの ような複雑な環境に適応できます。
+
+:::
+
+:::tip
+
+**`authentication_ldap_simple_bind_dn_pattern` との連携**
+
+DN パターン認証（例: `uid=${USER}@abc.com,ou=People,dc=example,dc=com`）を使用し、`${USER}` 置換後の属性値にユーザー名以外の部分が含まれる場合：
+
+- **推奨**: `ldap_user_search_attr` を設定しないでください。システムは完全な DN を使用してグループマッチングを行い、抽出エラーを回避します。
+- **設定が必要な場合**: 正規表現を使用してユーザー名部分のみを正確に抽出してください。例えば、DN パターンが `uid=${USER}@abc.com,ou=People,dc=example,dc=com` の場合、`ldap_user_search_attr` を `uid=([^,@]+)@abc.com` に設定し、`${USER}` に対応する部分のみを抽出します。`uid` や `uid=([^,]+)` と単純に設定すると、`alice` ではなく `alice@abc.com` が誤って抽出されます。
+
+:::
+
 #### `ldap_cache_arg` パラメーターグループ
 
 LDAP グループ情報のキャッシュ動作を定義するために使用される引数。
@@ -169,16 +178,6 @@ LDAP グループ情報のキャッシュ動作を定義するために使用さ
 ##### `ldap_cache_refresh_interval`
 
 オプション。StarRocks がキャッシュされた LDAP グループ情報を自動的に更新する間隔。単位: 秒。デフォルト: `900`。
-
-#### `group_file_url`
-
-ユーザーグループを定義するファイルへの URL または相対パス（`fe/conf` 以下）。
-
-:::note
-
-グループファイルには、グループとそのメンバーのリストが含まれています。各行でグループ名とメンバーをコロンで区切って定義できます。複数のユーザーはカンマで区切られます。例: `group_name:user_1,user_2,user_3`。
-
-:::
 
 ### 例
 
@@ -222,6 +221,49 @@ PROPERTIES(
 
 上記の例では、`ldap_group_filter` を使用して `groupOfNames` objectClass と `cn` が `testgroup` のグループを検索します。したがって、`cn` はグループを識別するために `ldap_group_identifier_attr` に指定されます。`ldap_group_member_attr` は `member` に設定されており、`groupOfNames` objectClass でメンバーを識別するために `member` 属性が使用されます。`ldap_user_search_attr` は `uid=([^,]+)` という式に設定されており、`member` 属性内のユーザーを識別するために使用されます。
 
+### Microsoft AD環境の例
+
+Microsoft AD サーバーに以下のグループとメンバー情報が存在すると仮定します：
+
+```Plain
+-- グループ情報
+# ADGroup, Groups, company.com
+dn: CN=ADGroup,OU=Groups,DC=company,DC=com
+objectClass: group
+cn: ADGroup
+member: CN=John Doe,OU=Users,DC=company,DC=com
+member: CN=Jane Smith,OU=Users,DC=company,DC=com
+-- ユーザー情報
+# John Doe, Users, company.com
+dn: CN=John Doe,OU=Users,DC=company,DC=com
+objectClass: user
+cn: John Doe
+sAMAccountName: johndoe
+```
+
+Microsoft AD 環境用の Group Provider を作成する:
+
+```SQL
+CREATE GROUP PROVIDER ad_group_provider 
+PROPERTIES(
+    "type"="ldap", 
+    "ldap_conn_url"="ldap://ad.company.com:389",
+    "ldap_bind_root_dn"="CN=admin,OU=Users,DC=company,DC=com",
+    "ldap_bind_root_pwd"="password",
+    "ldap_bind_base_dn"="DC=company,DC=com",
+    "ldap_group_filter"="(&(objectClass=group)(cn=ADGroup))",
+    "ldap_group_identifier_attr"="cn",
+    "ldap_group_member_attr"="member"
+    -- Note: Do not configure ldap_user_search_attr, system will use complete DN for matching
+)
+```
+
+この例では、`ldap_user_search_attr` が設定されていないため、システムは以下を行います：
+1. グループキャッシュ構築時、完全な DN（例：`CN=John Doe,OU=Users,DC=company,DC=com`）をユーザー識別子として直接使用します。
+2. グループ検索時、認証時に記録されたDNをキーとしてユーザーのグループを検索します。
+
+このアプローチは、Microsoft AD 環境において特に適しています。AD のグループメンバーには単純なユーザー名属性が存在しない場合があるためです。
+
 ## Group Provider をセキュリティインテグレーションと組み合わせる
 
 Group Provider を作成した後、セキュリティインテグレーションと組み合わせて、Group Provider で指定されたユーザーが StarRocks にログインできるようにすることができます。セキュリティインテグレーションの作成に関する詳細は、[Authenticate with Security Integration](./authentication/security_integration.md) を参照してください。
@@ -256,8 +298,18 @@ ALTER SECURITY INTEGRATION LDAP SET
 );
 ```
 
+## ユーザーグループにロールを付与する
+
+[GRANT](../../sql-reference/sql-statements/account-management/GRANT.md) を使用してユーザーグループにロールを付与できます。
+
+次の例は、ユーザーグループ `analysts` にロール `example_role` を付与します：
+
+```SQL
+GRANT example_role TO EXTERNAL GROUP analysts;
+```
+
 ## Group Provider を外部認可システム (Apache Ranger) と組み合わせる
 
 セキュリティインテグレーションで関連する Group Provider を構成すると、StarRocks はログイン時にユーザーのグループ情報を記録します。このグループ情報は、Ranger との認可プロセスに自動的に含まれ、追加の構成が不要になります。
 
-StarRocks と Ranger の統合に関する詳細な手順については、[Manage permissions with Apache Ranger](./authorization/ranger_plugin.md) を参照してください。
+<GroupProviderRangerLink />

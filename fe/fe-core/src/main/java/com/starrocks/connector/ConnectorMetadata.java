@@ -33,6 +33,7 @@ import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.metadata.MetadataTableType;
 import com.starrocks.credential.CloudConfiguration;
 import com.starrocks.qe.ConnectContext;
+import com.starrocks.qe.ShowResultSet;
 import com.starrocks.sql.ast.AddPartitionClause;
 import com.starrocks.sql.ast.AlterMaterializedViewStmt;
 import com.starrocks.sql.ast.AlterTableCommentClause;
@@ -40,7 +41,7 @@ import com.starrocks.sql.ast.AlterTableStmt;
 import com.starrocks.sql.ast.AlterViewStmt;
 import com.starrocks.sql.ast.CancelRefreshMaterializedViewStmt;
 import com.starrocks.sql.ast.CreateMaterializedViewStatement;
-import com.starrocks.sql.ast.CreateMaterializedViewStmt;
+import com.starrocks.sql.ast.CreateSyncMVStmt;
 import com.starrocks.sql.ast.CreateTableLikeStmt;
 import com.starrocks.sql.ast.CreateTableStmt;
 import com.starrocks.sql.ast.CreateViewStmt;
@@ -102,7 +103,7 @@ public interface ConnectorMetadata {
      * @return a list of partition names
      */
     default List<String> listPartitionNames(String databaseName, String tableName,
-                                            ConnectorMetadatRequestContext requestContext) {
+                                            ConnectorMetadataRequestContext requestContext) {
         return Lists.newArrayList();
     }
 
@@ -131,6 +132,13 @@ public interface ConnectorMetadata {
     }
 
     /**
+     * Build a temporary table from a pass-through query when the connector can infer the result schema.
+     */
+    default Table getTableFromQuery(ConnectContext context, String dbName, String query) {
+        return null;
+    }
+
+    /**
      * Get the Time Varying Relation (TVR) version range for the table between the specified versions.
      */
     default TvrVersionRange getTableVersionRange(String dbName, Table table,
@@ -139,10 +147,24 @@ public interface ConnectorMetadata {
         return TvrTableSnapshot.empty();
     }
 
+    /**
+     * @param dbName database name of the table
+     * @param table table name
+     * @return the current latest snapshot info of the input table.
+     */
     default TvrTableSnapshot getCurrentTvrSnapshot(String dbName, Table table) {
         return TvrTableSnapshot.empty();
     }
 
+    /**
+     * NOTE: ensure the last snapshot is at the last of the collection.
+     *
+     * @param dbName  database name
+     * @param table table name
+     * @param fromSnapshotExclusive from snapshot which is exclusive
+     * @param toSnapshotInclusive  to snapshot which is inclusive
+     * @return ordered delta traits which are from the start snapshot to the start snapshot.
+     */
     default List<TvrTableDeltaTrait> listTableDeltaTraits(String dbName, Table table,
                                                           TvrTableSnapshot fromSnapshotExclusive,
                                                           TvrTableSnapshot toSnapshotInclusive) {
@@ -172,10 +194,6 @@ public interface ConnectorMetadata {
         return RemoteFileInfoDefaultSource.EMPTY;
     }
 
-    default List<PartitionInfo> getRemotePartitions(Table table, List<String> partitionNames) {
-        return Lists.newArrayList();
-    }
-
     /**
      * Get table meta serialized specification
      *
@@ -193,6 +211,15 @@ public interface ConnectorMetadata {
 
     default List<PartitionInfo> getPartitions(Table table, List<String> partitionNames) {
         return Lists.newArrayList();
+    }
+
+    /**
+     * Get partition info at a specific snapshot identified by the request context.
+     * Default implementation ignores the context and falls back to the live-snapshot variant.
+     */
+    default List<PartitionInfo> getPartitions(Table table, List<String> partitionNames,
+                                              ConnectorMetadataRequestContext requestContext) {
+        return getPartitions(table, partitionNames);
     }
 
     /**
@@ -281,10 +308,15 @@ public interface ConnectorMetadata {
         throw new StarRocksConnectorException("This connector doesn't support sink");
     }
 
+    default void finishSink(String dbName, String table, List<TSinkCommitInfo> commitInfos, String branch, Object extra,
+                            ConnectContext context) {
+        finishSink(dbName, table, commitInfos, branch, extra);
+    }
+
     default void abortSink(String dbName, String table, List<TSinkCommitInfo> commitInfos) {
     }
 
-    default void alterTable(ConnectContext context, AlterTableStmt stmt) throws StarRocksException {
+    default ShowResultSet alterTable(ConnectContext context, AlterTableStmt stmt) throws StarRocksException {
         throw new StarRocksConnectorException("This connector doesn't support alter table");
     }
 
@@ -295,6 +327,7 @@ public interface ConnectorMetadata {
     }
 
     default void truncateTable(TruncateTableStmt truncateTableStmt, ConnectContext context) throws DdlException {
+        throw new StarRocksConnectorException("This connector doesn't support truncate table");
     }
 
     default void createTableLike(CreateTableLikeStmt stmt) throws DdlException {
@@ -310,7 +343,7 @@ public interface ConnectorMetadata {
     default void renamePartition(Database db, Table table, PartitionRenameClause renameClause) throws DdlException {
     }
 
-    default void createMaterializedView(CreateMaterializedViewStmt stmt)
+    default void createMaterializedView(CreateSyncMVStmt stmt)
             throws AnalysisException, DdlException {
     }
 
@@ -345,6 +378,10 @@ public interface ConnectorMetadata {
         throw new StarRocksConnectorException("This connector doesn't support getting cloud configuration");
     }
 
+    default Map<String, String> getCatalogProperties() {
+        return Map.of();
+    }
+
     default Set<DeleteFile> getDeleteFiles(IcebergTable icebergTable, Long snapshotId,
                                            ScalarOperator predicate, FileContent fileContent) {
         throw new StarRocksConnectorException("This connector doesn't support getting delete files");
@@ -355,5 +392,30 @@ public interface ConnectorMetadata {
     }
 
     default void shutdown() {
+    }
+
+    /**
+     * Check if the delete can be performed using metadata operations only.
+     * This is connector-specific optimization that allows deleting data by
+     * dropping entire files or partitions without generating position delete files.
+     *
+     * @param table     The table to delete from
+     * @param predicate The delete predicate in ScalarOperator form
+     * @return true if metadata-level delete can be used, false otherwise
+     */
+    default boolean canDeleteUsingMetadata(Table table, ScalarOperator predicate) {
+        return false;
+    }
+
+    /**
+     * Execute metadata-level delete for the given table and predicate.
+     * This method should only be called when canDeleteUsingMetadata returns true.
+     *
+     * @param table     The table to delete from
+     * @param predicate The delete predicate in ScalarOperator form
+     * @param context   The connect context for audit info
+     */
+    default void executeMetadataDelete(Table table, ScalarOperator predicate, ConnectContext context) {
+        throw new UnsupportedOperationException("Metadata delete is not supported by this connector");
     }
 }

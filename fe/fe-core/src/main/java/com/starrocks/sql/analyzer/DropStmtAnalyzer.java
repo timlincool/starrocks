@@ -21,6 +21,7 @@ import com.starrocks.authorization.ObjectType;
 import com.starrocks.authorization.PrivilegeType;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.Function;
+import com.starrocks.catalog.FunctionName;
 import com.starrocks.catalog.FunctionSearchDesc;
 import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.MvId;
@@ -30,6 +31,7 @@ import com.starrocks.catalog.system.information.InfoSchemaDb;
 import com.starrocks.catalog.system.sys.SysDb;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
+import com.starrocks.common.util.Util;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.CatalogMgr;
 import com.starrocks.server.GlobalStateMgr;
@@ -41,8 +43,8 @@ import com.starrocks.sql.ast.DropFunctionStmt;
 import com.starrocks.sql.ast.DropTableStmt;
 import com.starrocks.sql.ast.DropTemporaryTableStmt;
 import com.starrocks.sql.ast.FunctionArgsDef;
-import com.starrocks.sql.ast.expression.FunctionName;
-import com.starrocks.sql.ast.expression.TableName;
+import com.starrocks.sql.ast.FunctionRef;
+import com.starrocks.sql.ast.TableRef;
 import com.starrocks.sql.common.MetaUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -50,7 +52,7 @@ import org.apache.logging.log4j.Logger;
 import java.util.Set;
 import java.util.UUID;
 
-import static com.starrocks.sql.common.ErrorMsgProxy.PARSER_ERROR_MSG;
+import static com.starrocks.sql.parser.ErrorMsgProxy.PARSER_ERROR_MSG;
 
 public class DropStmtAnalyzer {
     private static final Logger LOG = LogManager.getLogger(DropStmtAnalyzer.class);
@@ -66,7 +68,10 @@ public class DropStmtAnalyzer {
 
         @Override
         public Void visitDropTableStatement(DropTableStmt statement, ConnectContext context) {
-            statement.getTableNameObject().normalization(context);
+            TableRef tableRef = statement.getTableRef();
+            if (tableRef != null) {
+                statement.setTableRef(AnalyzerUtils.normalizedTableRef(tableRef, context));
+            }
 
             // check catalog
             String catalogName = statement.getCatalogName();
@@ -79,25 +84,26 @@ public class DropStmtAnalyzer {
                 ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_DB_ERROR, dbName);
             }
             Table table = null;
-            String tableName = statement.getTableName();
+            String tableNameStr = statement.getTableName();
             try {
-                table = MetaUtils.getSessionAwareTable(context, db, new TableName(catalogName, dbName, tableName));
+                table = MetaUtils.getSessionAwareTable(context, db, 
+                        com.starrocks.catalog.TableName.fromTableRef(statement.getTableRef()));
             } catch (Exception e) {
                 // an exception will be thrown if table is not found, just ignore it
             }
             if (table == null) {
                 if (statement.isSetIfExists()) {
-                    LOG.info("drop table[{}] which does not exist", tableName);
+                    LOG.info("drop table[{}] which does not exist", tableNameStr);
                     return null;
                 } else {
-                    ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_TABLE_ERROR, tableName);
+                    ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_TABLE_ERROR, tableNameStr);
                 }
             } else {
                 if (table instanceof MaterializedView) {
                     throw new SemanticException(
                             "The data of '%s' cannot be dropped because '%s' is a materialized view," +
                                     "use 'drop materialized view %s' to drop it.",
-                            tableName, tableName, tableName);
+                            tableNameStr, tableNameStr, tableNameStr);
                 }
                 if (table.isTemporaryTable()) {
                     statement.setTemporaryTableMark(true);
@@ -106,11 +112,11 @@ public class DropStmtAnalyzer {
             // Check if a view
             if (statement.isView()) {
                 if (!table.isView()) {
-                    ErrorReport.reportSemanticException(ErrorCode.ERR_WRONG_OBJECT, db.getOriginName(), tableName, "VIEW");
+                    ErrorReport.reportSemanticException(ErrorCode.ERR_WRONG_OBJECT, db.getOriginName(), tableNameStr, "VIEW");
                 }
             } else {
                 if (table.isView()) {
-                    ErrorReport.reportSemanticException(ErrorCode.ERR_WRONG_OBJECT, db.getOriginName(), tableName, "TABLE");
+                    ErrorReport.reportSemanticException(ErrorCode.ERR_WRONG_OBJECT, db.getOriginName(), tableNameStr, "TABLE");
                 }
             }
             // Check mv dependency
@@ -125,7 +131,7 @@ public class DropStmtAnalyzer {
                                 .getTable(mvId.getDbId(), mvId.getId());
                         relatedMvNames.add(mvDb.getOriginName() + "." + mvTbl.getName());
                     }
-                    throw new SemanticException(tableName.toString() + " exists mv dependencies: " +
+                    throw new SemanticException(tableNameStr + " exists mv dependencies: " +
                             relatedMvNames.toString() + ", drop is not allowed. " +
                             "See more detailed information in `sys.object_dependencies`, " +
                             "or `set global enable_drop_table_check_mv_dependency=false`");
@@ -137,7 +143,10 @@ public class DropStmtAnalyzer {
         @Override
         public Void visitDropTemporaryTableStatement(DropTemporaryTableStmt statement, ConnectContext context) {
             statement.setSessionId(context.getSessionId());
-            statement.getTableNameObject().normalization(context);
+            TableRef tableRef = statement.getTableRef();
+            if (tableRef != null) {
+                statement.setTableRef(AnalyzerUtils.normalizedTableRef(tableRef, context));
+            }
 
             // check catalog
             String catalogName = statement.getCatalogName();
@@ -176,7 +185,9 @@ public class DropStmtAnalyzer {
                 if (Strings.isNullOrEmpty(context.getCurrentCatalog())) {
                     throw new SemanticException(PARSER_ERROR_MSG.noCatalogSelected());
                 }
-                statement.setCatalogName(context.getCurrentCatalog());
+
+                String normalizedCatalogName = Util.normalizeName(context.getCurrentCatalog());
+                statement.setCatalogName(normalizedCatalogName);
             }
 
             MetaUtils.checkCatalogExistAndReport(statement.getCatalogName());
@@ -199,32 +210,30 @@ public class DropStmtAnalyzer {
 
         @Override
         public Void visitDropFunctionStatement(DropFunctionStmt statement, ConnectContext context) {
-            // analyze function name
-            FunctionName functionName = statement.getFunctionName();
-            functionName.analyze(context.getDatabase());
+            FunctionRef functionRef = statement.getFunctionRef();
+            String defaultDb = functionRef.isGlobalFunction() ? FunctionRefAnalyzer.GLOBAL_UDF_DB : context.getDatabase();
+            FunctionRefAnalyzer.analyzeFunctionRef(functionRef, defaultDb);
+            FunctionName functionName = FunctionRefAnalyzer.resolveFunctionName(functionRef, defaultDb);
             // analyze arguments
             FunctionArgsDef argsDef = statement.getArgsDef();
-            argsDef.analyze();
+            FunctionRefAnalyzer.analyzeArgsDef(argsDef);
 
             FunctionSearchDesc funcDesc = new FunctionSearchDesc(functionName, argsDef.getArgTypes(),
                     argsDef.isVariadic());
-            statement.setFunctionSearchDesc(funcDesc);
 
             // check function existence
-            Function func;
+            Function func = null;
             if (functionName.isGlobalFunction()) {
                 func = GlobalStateMgr.getCurrentState().getGlobalFunctionMgr().getFunction(funcDesc);
-                if (func == null) {
-                    ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_FUNC_ERROR, funcDesc.toString());
-                }
             } else {
                 Database db = GlobalStateMgr.getCurrentState().getLocalMetastore().getDb(functionName.getDb());
                 if (db != null) {
-                    func = db.getFunction(statement.getFunctionSearchDesc());
-                    if (func == null) {
-                        ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_FUNC_ERROR, funcDesc.toString());
-                    }
+                    func = db.getFunction(funcDesc);
                 }
+            }
+
+            if (func == null && !statement.dropIfExists()) {
+                ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_FUNC_ERROR, funcDesc.toString());
             }
 
             return null;
